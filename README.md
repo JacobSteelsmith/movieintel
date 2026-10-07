@@ -487,8 +487,4 @@ infra/
   handlers/                # thin Lambda wrappers over the movieintel package
   constants.py             # shared bundling + inference-profile IAM helpers
 docs/            # openapi.yaml, examples/, responsible-ai.md, cost-and-teardown.md
-_docs/spec/      # authoritative requirements.md / design.md / tasks.md
 ```
-
-See [`_docs/spec/`](_docs/spec/) for the authoritative requirements, design, and task
-breakdown.
