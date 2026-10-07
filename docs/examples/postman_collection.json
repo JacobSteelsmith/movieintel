@@ -1,0 +1,76 @@
+{
+  "info": {
+    "name": "MovieIntel Serving API",
+    "description": "Example requests for the MovieIntel POST /query serving endpoint (Task 10 FEAT-001, REQ-B-4.3). Set the API_URL collection variable to the deployed base URL (no trailing slash). All bodies match the QueryRequest schema in docs/openapi.yaml.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "API_URL",
+      "value": "https://example.execute-api.us-east-1.amazonaws.com/prod",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Recommendation query",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "content-type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{API_URL}}/query",
+          "host": ["{{API_URL}}"],
+          "path": ["query"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"query\": \"Recommend action movies with high revenue and positive sentiment.\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "description": "Expect HTTP 200 with a kind=recommendations AgentResult."
+      }
+    },
+    {
+      "name": "Comparison query (max_turns override)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "content-type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{API_URL}}/query",
+          "host": ["{{API_URL}}"],
+          "path": ["query"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"query\": \"Compare the two highest-PES science-fiction films side by side.\",\n  \"max_turns\": 8\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "description": "Expect HTTP 200 with a kind=comparison AgentResult."
+      }
+    },
+    {
+      "name": "Schema-violating body (missing query)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "content-type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{API_URL}}/query",
+          "host": ["{{API_URL}}"],
+          "path": ["query"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"not_query\": \"this body is missing the required query field\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "description": "Expect HTTP 400 with an error=invalid_request ValidationErrorResponse; the agent is never invoked."
+      }
+    }
+  ]
+}

@@ -1,0 +1,334 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MovieIntel Serving API",
+    "version": "0.1.0",
+    "description": "Agentic movie-intelligence query endpoint. POST a natural-language query; the service runs the Bedrock Converse agent loop over the enriched-movie tools and returns one structured AgentResult."
+  },
+  "paths": {
+    "/query": {
+      "post": {
+        "operationId": "postQuery",
+        "summary": "Run an agentic movie-intelligence query.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A structured AgentResult (one of recommendations, preferences, comparison, bounded, or refusal), discriminated by 'kind'. A Guardrail refusal is a valid 200 outcome.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/RecommendationList"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PreferenceSummary"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ComparativeAnalysis"
+                    },
+                    {
+                      "$ref": "#/components/schemas/BoundedResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/RefusalResponse"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "kind"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request body was malformed or violated the schema; the agent was not invoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "QueryRequest": {
+        "additionalProperties": false,
+        "description": "The POST ``/query`` request body (REQ-B-4.1).\n\n``query`` is the required natural-language request (non-empty). ``max_turns`` is an\noptional override of the agent loop's turn bound, constrained to ``[1, MAX_TURNS_CAP]``;\nwhen omitted (``None``) the handler falls back to the loop default.",
+        "properties": {
+          "query": {
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          },
+          "max_turns": {
+            "anyOf": [
+              {
+                "maximum": 12,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Max Turns"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "title": "QueryRequest",
+        "type": "object"
+      },
+      "ValidationErrorResponse": {
+        "additionalProperties": false,
+        "description": "Structured 400 body for a schema-violating request (REQ-B-4.4, REQ-X-3.3).\n\nMirrors :class:`movieintel.agent.response.FinalAnswerError`: a literal ``error``\ndiscriminator and a ``detail`` list carrying the Pydantic/JSON error entries from\n``ValidationError.errors(include_url=False)`` (or an equivalent decode-error entry).",
+        "properties": {
+          "error": {
+            "const": "invalid_request",
+            "default": "invalid_request",
+            "title": "Error",
+            "type": "string"
+          },
+          "detail": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "ValidationErrorResponse",
+        "type": "object"
+      },
+      "Mood": {
+        "description": "Fixed mood/tone label set; the model must choose one best-fit member (\u00a77.1).\n\nExactly these six members \u2014 out-of-set values are rejected.",
+        "enum": [
+          "dark",
+          "light",
+          "intense",
+          "uplifting",
+          "tense",
+          "lighthearted"
+        ],
+        "title": "Mood",
+        "type": "string"
+      },
+      "RecommendedMovie": {
+        "additionalProperties": false,
+        "description": "One movie in a :class:`RecommendationList` (the model's chosen rationale + facts).",
+        "properties": {
+          "movie_id": {
+            "title": "Movie Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "sentiment": {
+            "$ref": "#/components/schemas/Sentiment"
+          },
+          "pes": {
+            "title": "Pes",
+            "type": "number"
+          },
+          "mood": {
+            "$ref": "#/components/schemas/Mood"
+          },
+          "rationale": {
+            "title": "Rationale",
+            "type": "string"
+          }
+        },
+        "required": [
+          "movie_id",
+          "title",
+          "sentiment",
+          "pes",
+          "mood",
+          "rationale"
+        ],
+        "title": "RecommendedMovie",
+        "type": "object"
+      },
+      "Sentiment": {
+        "description": "Overview sentiment label (LLM-assigned in Task 3).",
+        "enum": [
+          "positive",
+          "negative",
+          "neutral"
+        ],
+        "title": "Sentiment",
+        "type": "string"
+      },
+      "RecommendationList": {
+        "additionalProperties": false,
+        "description": "Recommendation result \u2014 e.g. \"Recommend action movies ...\" (REQ-B-3.3).",
+        "properties": {
+          "kind": {
+            "const": "recommendations",
+            "default": "recommendations",
+            "title": "Kind",
+            "type": "string"
+          },
+          "query_summary": {
+            "title": "Query Summary",
+            "type": "string"
+          },
+          "movies": {
+            "items": {
+              "$ref": "#/components/schemas/RecommendedMovie"
+            },
+            "title": "Movies",
+            "type": "array"
+          }
+        },
+        "required": [
+          "query_summary",
+          "movies"
+        ],
+        "title": "RecommendationList",
+        "type": "object"
+      },
+      "PreferenceSummary": {
+        "additionalProperties": false,
+        "description": "Preference-summary result \u2014 e.g. \"Summarize preferences for a user ...\" (REQ-B-3.3).",
+        "properties": {
+          "kind": {
+            "const": "preferences",
+            "default": "preferences",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "highlights": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Highlights",
+            "type": "array"
+          }
+        },
+        "required": [
+          "subject",
+          "summary",
+          "highlights"
+        ],
+        "title": "PreferenceSummary",
+        "type": "object"
+      },
+      "ComparativeAnalysis": {
+        "additionalProperties": false,
+        "description": "Comparative-analysis result for a compare-oriented task (REQ-B-3.3).",
+        "properties": {
+          "kind": {
+            "const": "comparison",
+            "default": "comparison",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subjects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Subjects",
+            "type": "array"
+          },
+          "dimensions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Dimensions",
+            "type": "array"
+          },
+          "narrative": {
+            "title": "Narrative",
+            "type": "string"
+          }
+        },
+        "required": [
+          "subjects",
+          "dimensions",
+          "narrative"
+        ],
+        "title": "ComparativeAnalysis",
+        "type": "object"
+      },
+      "BoundedResponse": {
+        "additionalProperties": false,
+        "description": "The MAX_TURNS outcome: the loop stopped at its bound without a final answer (REQ-B-3.2).",
+        "properties": {
+          "kind": {
+            "const": "bounded",
+            "default": "bounded",
+            "title": "Kind",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "turns_used": {
+            "title": "Turns Used",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reason",
+          "turns_used"
+        ],
+        "title": "BoundedResponse",
+        "type": "object"
+      },
+      "RefusalResponse": {
+        "additionalProperties": false,
+        "description": "The Guardrail-intervention outcome; carries NO movie/content data (REQ-B-3.5).",
+        "properties": {
+          "kind": {
+            "const": "refusal",
+            "default": "refusal",
+            "title": "Kind",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "RefusalResponse",
+        "type": "object"
+      }
+    }
+  }
+}
