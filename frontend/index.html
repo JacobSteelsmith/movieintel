@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MovieIntel</title>
+    <link rel="stylesheet" href="styles.css" />
+    <!--
+      Baseline accessibility features present in this page:
+        - the query input is a real <textarea> with an associated <label for>;
+        - submission uses a real <button type="submit"> inside a <form>, so it is
+          keyboard-operable (Enter/Space) without extra scripting;
+        - a single aria-live="polite" role="status" region announces staged
+          progress, results, and errors to assistive technology.
+      These are baseline affordances only. Full WCAG conformance is NOT claimed
+      from the code alone; it requires manual assistive-technology testing and
+      expert review.
+    -->
+  </head>
+  <body>
+    <main class="layout">
+      <header class="header">
+        <h1>MovieIntel</h1>
+        <p class="subtitle">Ask about movies, preferences, or comparisons.</p>
+      </header>
+
+      <form id="query-form" class="query-form" autocomplete="off">
+        <label for="query-input">Your question</label>
+        <textarea
+          id="query-input"
+          name="query"
+          rows="4"
+          placeholder="e.g. Recommend some uplifting action movies"
+        ></textarea>
+        <button id="submit-button" type="submit">Ask</button>
+      </form>
+
+      <!--
+        Single aria-live region reused for staged progress, results and errors
+        so the UI never leaves the user stuck on a stale "loading" state.
+      -->
+      <section
+        id="status"
+        class="status"
+        role="status"
+        aria-live="polite"
+      ></section>
+    </main>
+
+    <!-- config.js MUST load before app.js so window.API_BASE_URL is defined. -->
+    <script src="config.js"></script>
+    <script src="app.js" defer></script>
+  </body>
+</html>
