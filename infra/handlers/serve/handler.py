@@ -45,6 +45,37 @@ from movieintel.serving.schemas import QueryRequest, ValidationErrorResponse
 
 _JSON_HEADERS = {"content-type": "application/json"}
 
+#: GET /health is the warmup short-circuit route (design 2.3). It returns immediately with
+#: a tiny JSON body and never touches the agent loop, config, clients, or repository.
+_HEALTH_PATH = "/health"
+_HEALTH_METHOD = "GET"
+
+
+def _is_health_request(event: dict[str, Any]) -> bool:
+    """True when the event is a GET /health request across the proxy shapes we accept.
+
+    Matches the API-Gateway HTTP-API ``routeKey`` (``GET /health``), the v2
+    ``requestContext.http.{method,path}`` pair, or the v1-style top-level
+    ``httpMethod`` + (``rawPath`` or ``path``).
+    """
+    if event.get("routeKey") == f"{_HEALTH_METHOD} {_HEALTH_PATH}":
+        return True
+    http = event.get("requestContext", {}).get("http", {})
+    if (http.get("method"), http.get("path")) == (_HEALTH_METHOD, _HEALTH_PATH):
+        return True
+    return event.get("httpMethod") == _HEALTH_METHOD and (
+        event.get("rawPath") == _HEALTH_PATH or event.get("path") == _HEALTH_PATH
+    )
+
+
+def _health_response() -> dict[str, Any]:
+    """Build the minimal GET /health 200 API-Gateway-proxy response."""
+    return {
+        "statusCode": 200,
+        "headers": dict(_JSON_HEADERS),
+        "body": json.dumps({"status": "ok"}),
+    }
+
 
 def _default_bedrock_client(config: BedrockConfig) -> BedrockConverseClient:
     """Build the live ``bedrock-runtime`` client from the configured region.
@@ -141,6 +172,13 @@ def handler(
     :class:`~movieintel.agent.response.AgentResult`; a Guardrail refusal is one such valid
     200 outcome, not a request error.
     """
+    # Warmup short-circuit (design 2.3): GET /health is intentionally minimal - it builds
+    # no boto3 client, dependency, or config and never reaches the agent, because the
+    # container init already loads the full import graph (so hitting /health warms the real
+    # serving container) and warmup must add NO new IAM/Bedrock/DynamoDB surface.
+    if _is_health_request(event):
+        return _health_response()
+
     try:
         request = _parse_request(event)
     except json.JSONDecodeError as exc:

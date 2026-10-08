@@ -1,0 +1,204 @@
+/*
+ * MovieIntel front end styling. Plain CSS, no framework.
+ * Inline <style>/style= is intentionally avoided: the hosting CSP allows
+ * style-src 'unsafe-inline' but scripts stay external (script-src 'self'),
+ * and keeping styles here mirrors that external-only discipline.
+ */
+
+:root {
+  --bg: #0f1420;
+  --surface: #1a2030;
+  --surface-2: #232b3d;
+  --border: #2f3a52;
+  --text: #e7ecf5;
+  --muted: #a3adc2;
+  --accent: #4f8cff;
+
+  --sentiment-positive: #2e7d4f;
+  --sentiment-negative: #a33a3a;
+  --sentiment-neutral: #4a556a;
+
+  --mood-dark: #3b3b52;
+  --mood-light: #7a6f3a;
+  --mood-intense: #8a3a2e;
+  --mood-uplifting: #2e6f7a;
+  --mood-tense: #6b2e5a;
+  --mood-lighthearted: #3a7a4a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+}
+
+.layout {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 2rem 1rem 4rem;
+}
+
+.header h1 {
+  margin: 0 0 0.25rem;
+}
+
+.subtitle {
+  margin: 0 0 1.5rem;
+  color: var(--muted);
+}
+
+.query-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.query-form label {
+  font-weight: 600;
+}
+
+.query-form textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.query-form button {
+  align-self: flex-start;
+  padding: 0.6rem 1.4rem;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.query-form button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.status {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.notice {
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.notice.progress {
+  color: var(--muted);
+}
+
+.notice.error {
+  border-color: var(--sentiment-negative);
+  color: #ffd9d9;
+}
+
+.result-heading {
+  margin: 0 0 0.5rem;
+  font-size: 1.1rem;
+}
+
+.card {
+  padding: 1rem;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.card + .card {
+  margin-top: 0.75rem;
+}
+
+.card-title {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.badge .badge-label {
+  color: var(--muted);
+  font-weight: 400;
+  margin-right: 0.25rem;
+}
+
+/* Sentiment badge variants. */
+.badge.sentiment-positive {
+  background: var(--sentiment-positive);
+}
+.badge.sentiment-negative {
+  background: var(--sentiment-negative);
+}
+.badge.sentiment-neutral {
+  background: var(--surface-2);
+}
+
+/* Mood badge variants (the fixed six-member Mood set). */
+.badge.mood-dark {
+  background: var(--mood-dark);
+}
+.badge.mood-light {
+  background: var(--mood-light);
+}
+.badge.mood-intense {
+  background: var(--mood-intense);
+}
+.badge.mood-uplifting {
+  background: var(--mood-uplifting);
+}
+.badge.mood-tense {
+  background: var(--mood-tense);
+}
+.badge.mood-lighthearted {
+  background: var(--mood-lighthearted);
+}
+
+.pes {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.rationale {
+  margin: 0.5rem 0 0;
+}
+
+.highlight-list {
+  margin: 0.5rem 0 0;
+  padding-left: 1.25rem;
+}
