@@ -49,6 +49,9 @@ from aws_cdk import (
 from aws_cdk import (
     aws_lambda as lambda_,
 )
+from aws_cdk import (
+    aws_wafv2 as wafv2,
+)
 from constants import (
     REPO_ROOT,
     bedrock_invoke_model_resources,
@@ -76,6 +79,24 @@ DEPLOYED_KNOWLEDGE_BASE_ID = "YNXUIXEYBQ"
 #: statusCode/headers/body straight through (REQ-B-4.1/.4).
 QUERY_ROUTE_PATH = "/query"
 
+#: Warmup route the serving API exposes alongside POST /query. GET /health is served by
+#: the SAME ServingFn (so hitting it warms the real serving container) and short-circuits
+#: inside the handler before the agent loop.
+HEALTH_ROUTE_PATH = "/health"
+
+#: CDK context key + default for the CORS allow-origin on the HTTP API's preflight.
+CORS_ALLOW_ORIGIN_CONTEXT_KEY = "cors_allow_origin"
+# design 2.5: '*' is a first-deploy placeholder. A wildcard origin is incompatible with
+# credentialed (cookie/Authorization) requests, so once FEAT-003 deploys the CloudFront
+# distribution, pin this via `--context cors_allow_origin=https://<domain>` to the exact
+# CloudFront domain. No origin-string validation is performed here by design - the context
+# value is passed through verbatim.
+DEFAULT_CORS_ALLOW_ORIGIN = "*"
+
+#: CDK context key gating the WAF WebACL association. The WebACL is defined unconditionally;
+#: the association to the API stage is opt-in (default off) so synth/deploy stay decoupled.
+WAF_ASSOCIATE_CONTEXT_KEY = "associate_waf"
+
 
 class MovieIntelServingStack(Stack):
     """API Gateway -> serving Lambda invoking the agent loop over the deployed resources."""
@@ -91,6 +112,7 @@ class MovieIntelServingStack(Stack):
         self.serving_function = self._serving_lambda()
         self._grant_iam()
         self.api = self._http_api()
+        self.web_acl = self._waf()
         self._outputs()
 
     # -- guardrail ------------------------------------------------------------
@@ -242,27 +264,125 @@ class MovieIntelServingStack(Stack):
 
     # -- API ------------------------------------------------------------------
 
+    def _cors_allow_origin(self) -> str:
+        """Resolve the CORS allow-origin from CDK context, defaulting to the placeholder.
+
+        Reads the ``cors_allow_origin`` context value (set to the CloudFront domain after
+        FEAT-003 deploys) and falls back to :data:`DEFAULT_CORS_ALLOW_ORIGIN`.
+        """
+        origin = self.node.try_get_context(CORS_ALLOW_ORIGIN_CONTEXT_KEY)
+        return origin if isinstance(origin, str) and origin else DEFAULT_CORS_ALLOW_ORIGIN
+
     def _http_api(self) -> apigwv2.HttpApi:
-        """HTTP API with a POST /query route proxied to the serving Lambda.
+        """HTTP API with POST /query and GET /health routes proxied to the serving Lambda.
 
         Lambda-proxy (AWS_PROXY) integration passes the handler's statusCode/headers/body
         through unchanged (REQ-B-4.1), so the structured 200/400 responses the handler
-        builds reach the caller verbatim.
+        builds reach the caller verbatim. GET /health is attached to the SAME integration
+        so the warmup ping warms the real serving container. The browser front end is
+        cross-origin, so the API carries a CORS preflight config.
         """
         api = apigwv2.HttpApi(
             self,
             "ServingHttpApi",
-            description="movieintel serving API - POST /query over the agent loop.",
+            description="movieintel serving API - POST /query and GET /health over the agent loop.",
+            cors_preflight=apigwv2.CorsPreflightOptions(
+                allow_origins=[self._cors_allow_origin()],
+                allow_methods=[
+                    apigwv2.CorsHttpMethod.GET,
+                    apigwv2.CorsHttpMethod.POST,
+                    apigwv2.CorsHttpMethod.OPTIONS,
+                ],
+                allow_headers=["content-type", "authorization"],
+            ),
+        )
+        integration = apigwv2_integrations.HttpLambdaIntegration(
+            "ServingIntegration",
+            handler=self.serving_function,
         )
         api.add_routes(
             path=QUERY_ROUTE_PATH,
             methods=[apigwv2.HttpMethod.POST],
-            integration=apigwv2_integrations.HttpLambdaIntegration(
-                "ServingIntegration",
-                handler=self.serving_function,
-            ),
+            integration=integration,
+        )
+        api.add_routes(
+            path=HEALTH_ROUTE_PATH,
+            methods=[apigwv2.HttpMethod.GET],
+            integration=integration,
         )
         return api
+
+    # -- WAF ------------------------------------------------------------------
+
+    def _associate_waf(self) -> bool:
+        """True when the ``associate_waf`` context flag opts in to the stage association."""
+        return bool(self.node.try_get_context(WAF_ASSOCIATE_CONTEXT_KEY))
+
+    def _waf(self) -> wafv2.CfnWebACL:
+        """Define a rate-based REGIONAL WebACL and (opt-in) associate it with the API stage.
+
+        The WebACL is created UNCONDITIONALLY so it is always in the template; it allows by
+        default and blocks any single IP exceeding 600 requests in the rate window. The
+        association to the HTTP API ``$default`` stage is created ONLY when the
+        ``associate_waf`` context flag is set, keeping synth decoupled from a live stage.
+        """
+        web_acl = wafv2.CfnWebACL(
+            self,
+            "ServingWebAcl",
+            name="movieintel-serving-waf",
+            scope="REGIONAL",
+            default_action=wafv2.CfnWebACL.DefaultActionProperty(
+                allow=wafv2.CfnWebACL.AllowActionProperty()
+            ),
+            visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
+                cloud_watch_metrics_enabled=True,
+                metric_name="movieintel-serving-waf",
+                sampled_requests_enabled=True,
+            ),
+            rules=[
+                wafv2.CfnWebACL.RuleProperty(
+                    name="per-ip-rate-limit",
+                    priority=1,
+                    action=wafv2.CfnWebACL.RuleActionProperty(
+                        block=wafv2.CfnWebACL.BlockActionProperty()
+                    ),
+                    statement=wafv2.CfnWebACL.StatementProperty(
+                        rate_based_statement=wafv2.CfnWebACL.RateBasedStatementProperty(
+                            limit=600,
+                            aggregate_key_type="IP",
+                        )
+                    ),
+                    visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
+                        cloud_watch_metrics_enabled=True,
+                        metric_name="movieintel-serving-per-ip-rate-limit",
+                        sampled_requests_enabled=True,
+                    ),
+                )
+            ],
+        )
+
+        # TODO(waf): the association is deploy-verified rather than synth-asserted against a
+        # live stage. Associate it with
+        # `npx aws-cdk@2 deploy MovieIntelServingStack --context associate_waf=true` (design
+        # 2.6). Never drop the WebACL itself - only the association is flag-gated.
+        if self._associate_waf():
+            # The HTTP API auto-creates the $default stage, so default_stage is non-None
+            # here; assert it for the type checker before reading its name.
+            default_stage = self.api.default_stage
+            assert default_stage is not None  # noqa: S101
+            stage_arn = Stack.of(self).format_arn(
+                service="apigateway",
+                account="",
+                resource="/apis",
+                resource_name=f"{self.api.api_id}/stages/{default_stage.stage_name}",
+            )
+            wafv2.CfnWebACLAssociation(
+                self,
+                "ServingWebAclAssociation",
+                resource_arn=stage_arn,
+                web_acl_arn=web_acl.attr_arn,
+            )
+        return web_acl
 
     # -- outputs --------------------------------------------------------------
 

@@ -75,7 +75,10 @@ def test_api_gateway_integrated_with_the_lambda(template: Template) -> None:
             res["Properties"].get("IntegrationType") for res in integrations.values()
         }
         assert "AWS_PROXY" in integration_types, integration_types
-        template.resource_count_is("AWS::ApiGatewayV2::Route", 1)
+        template.resource_count_is("AWS::ApiGatewayV2::Route", 2)
+        routes = template.find_resources("AWS::ApiGatewayV2::Route")
+        route_keys = {res["Properties"].get("RouteKey") for res in routes.values()}
+        assert route_keys == {"POST /query", "GET /health"}, route_keys
     else:
         methods = template.find_resources("AWS::ApiGateway::Method")
         rest_integration_types: set[object] = set()
@@ -84,6 +87,69 @@ def test_api_gateway_integrated_with_the_lambda(template: Template) -> None:
             if isinstance(integration, dict):
                 rest_integration_types.add(integration.get("Type"))
         assert "AWS_PROXY" in rest_integration_types, rest_integration_types
+
+
+def test_health_route_exists_on_the_same_api(template: Template) -> None:
+    """A GET /health route exists on the HTTP API alongside POST /query."""
+    routes = template.find_resources("AWS::ApiGatewayV2::Route")
+    route_keys = {res["Properties"].get("RouteKey") for res in routes.values()}
+    assert "GET /health" in route_keys, route_keys
+    assert "POST /query" in route_keys, route_keys
+
+
+def test_cors_preflight_allows_get_post_options(template: Template) -> None:
+    """The HTTP API carries a CORS preflight config allowing GET/POST/OPTIONS."""
+    apis = template.find_resources("AWS::ApiGatewayV2::Api")
+    cors_methods: set[object] = set()
+    for res in apis.values():
+        cors = res["Properties"].get("CorsConfiguration")
+        if isinstance(cors, dict):
+            cors_methods |= set(cors.get("AllowMethods", []))
+    assert {"GET", "POST", "OPTIONS"} <= cors_methods, cors_methods
+
+
+def test_waf_webacl_has_rate_based_rule(template: Template) -> None:
+    """Exactly one REGIONAL WebACL with a per-IP rate-based rule (limit 600) is defined.
+
+    The WebACL is created unconditionally, so it is present even without the
+    ``associate_waf`` flag.
+    """
+    template.resource_count_is("AWS::WAFv2::WebACL", 1)
+    acls = template.find_resources("AWS::WAFv2::WebACL")
+    (props,) = (res["Properties"] for res in acls.values())
+    assert props.get("Scope") == "REGIONAL", props
+    assert "\u2014" not in props.get("Name", ""), "em dash in WebACL name"
+    rules = props["Rules"]
+    rate_stmts = [
+        rule["Statement"]["RateBasedStatement"]
+        for rule in rules
+        if "RateBasedStatement" in rule.get("Statement", {})
+    ]
+    assert len(rate_stmts) == 1, rate_stmts
+    (rate,) = rate_stmts
+    assert rate["Limit"] == 600, rate
+    assert rate["AggregateKeyType"] == "IP", rate
+
+
+def test_no_waf_association_without_the_context_flag(template: Template) -> None:
+    """Without ``associate_waf``, no association exists but the WebACL still does."""
+    template.resource_count_is("AWS::WAFv2::WebACLAssociation", 0)
+    template.resource_count_is("AWS::WAFv2::WebACL", 1)
+
+
+def test_waf_association_created_when_flag_set() -> None:
+    """With ``associate_waf=true`` in context, one association targets the $default stage."""
+    app = cdk.App(context={"associate_waf": True})
+    stack = MovieIntelServingStack(
+        app, "MovieIntelServingStack", env=cdk.Environment(region="us-east-1")
+    )
+    flagged = Template.from_stack(stack)
+
+    flagged.resource_count_is("AWS::WAFv2::WebACLAssociation", 1)
+    associations = flagged.find_resources("AWS::WAFv2::WebACLAssociation")
+    (props,) = (res["Properties"] for res in associations.values())
+    resource_arn = json.dumps(props.get("ResourceArn"))
+    assert "/stages/" in resource_arn and "$default" in resource_arn, props
 
 
 def test_serving_lambda_env_pins_deployed_resource_ids(template: Template) -> None:

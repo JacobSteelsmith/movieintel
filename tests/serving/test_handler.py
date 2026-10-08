@@ -48,6 +48,16 @@ def _proxy_event(body: str | None, *, is_base64: bool = False) -> dict[str, Any]
     }
 
 
+def _health_event() -> dict[str, Any]:
+    """Build a minimal API-Gateway-proxy GET /health event (no body)."""
+    return {
+        "routeKey": "GET /health",
+        "rawPath": "/health",
+        "requestContext": {"http": {"method": "GET", "path": "/health"}},
+        "headers": {},
+    }
+
+
 def _call(
     event: dict[str, Any],
     *,
@@ -177,6 +187,64 @@ def test_base64_encoded_body_is_decoded(
     assert response["statusCode"] == 200
     body = json.loads(response["body"])
     assert body["kind"] == "comparison"
+
+
+# ------------------------------------------------- (a2) GET /health warmup short-circuit
+
+
+def test_health_request_returns_200_ok_without_invoking_agent(
+    bedrock_config: BedrockConfig,
+    persistence_config: PersistenceConfig,
+    kb_config: KBConfig,
+) -> None:
+    repo = StubRepository()
+    kb = FakeAgentRuntime()
+    client = CapturingConverseClient([])  # any converse call would raise
+
+    response = _call(
+        _health_event(),
+        client=client,
+        repository=repo,
+        kb_client=kb,
+        config=bedrock_config,
+        persistence=persistence_config,
+        kb_config=kb_config,
+    )
+
+    assert response["statusCode"] == 200
+    assert json.loads(response["body"]) == {"status": "ok"}
+    # The warmup short-circuit never reaches the agent, repository, or KB client.
+    assert client.requests == []
+    assert repo.calls == []
+    assert kb.calls == []
+
+
+def test_bodyless_get_health_event_returns_200_not_400(
+    bedrock_config: BedrockConfig,
+    persistence_config: PersistenceConfig,
+    kb_config: KBConfig,
+) -> None:
+    repo = StubRepository()
+    kb = FakeAgentRuntime()
+    client = CapturingConverseClient([])
+    # A GET /health event has no body; the short-circuit must answer 200 before the
+    # missing-body path can produce a 400.
+    event = _health_event()
+    assert "body" not in event
+
+    response = _call(
+        event,
+        client=client,
+        repository=repo,
+        kb_client=kb,
+        config=bedrock_config,
+        persistence=persistence_config,
+        kb_config=kb_config,
+    )
+
+    assert response["statusCode"] == 200
+    assert json.loads(response["body"]) == {"status": "ok"}
+    assert client.requests == []
 
 
 # --------------------------------------- (b) schema-violating body -> 400, no agent call
