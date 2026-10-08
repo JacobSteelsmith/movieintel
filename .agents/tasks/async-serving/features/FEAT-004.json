@@ -1,0 +1,26 @@
+{
+  "id": "FEAT-004",
+  "type": "feat",
+  "description": "OpenAPI contract regeneration: extend the generator in src/movieintel/serving/openapi.py to document POST /jobs and GET /jobs/{id} alongside the existing POST /query, harvest the new component schemas, regenerate docs/openapi.yaml, and extend the generator tests. Depends on FEAT-002 (imports the job models from movieintel.serving.jobs). Independent of FEAT-003.",
+  "status": "pending",
+  "steps": [
+    "In src/movieintel/serving/openapi.py build_openapi(): import the job models from movieintel.serving.jobs (SubmitResponse, JobStatusResponse, JobProgress, WorkerError, NotFoundResponse) and include them in the models tuple passed to _collect_schemas (ProgressPhase and JobStatus come along as $defs via model_json_schema; ensure they land in components.schemas). Keep QueryRequest/ValidationErrorResponse/the five AgentResult models.",
+    "Add a POST /jobs path entry: requestBody referencing QueryRequest; 202 response referencing SubmitResponse; 400 response referencing ValidationErrorResponse. Reuse the _COMPONENTS_PREFIX ref style already in the file.",
+    "Add a GET /jobs/{id} path entry: a path parameter `id` (in: path, required: true, schema type string); 200 response referencing JobStatusResponse (which embeds the AgentResult oneOf via its `result` field schema produced by model_json_schema); 404 response referencing NotFoundResponse. Keep the existing /query entry exactly. Do NOT add /health (the generator intentionally omits it).",
+    "Regenerate the on-disk artifact: `uv run python -m movieintel.serving.openapi` so docs/openapi.yaml is in sync.",
+    "Extend tests/serving/test_openapi.py: add assertions that spec['paths'] contains '/jobs' with a post carrying 202 and 400, and '/jobs/{id}' with a get carrying 200 and 404 and a path parameter named 'id'; that components.schemas contains SubmitResponse, JobStatusResponse, JobProgress, WorkerError, NotFoundResponse (and the ProgressPhase/JobStatus enums); and that the on-disk file stays in sync (the existing test_on_disk_openapi_is_in_sync covers this, but confirm it still passes after regeneration). Keep the existing /query assertions."
+  ],
+  "acceptance_criteria": [
+    "build_openapi() documents POST /query, POST /jobs, and GET /jobs/{id} (and NOT /health) with the correct status codes and component schemas — AC-11.",
+    "docs/openapi.yaml is regenerated and test_on_disk_openapi_is_in_sync passes.",
+    "`uv run pytest tests/serving/test_openapi.py` passes with the new assertions.",
+    "`uv run ruff check .`, `uv run ruff format --check .`, and `uv run mypy src` pass."
+  ],
+  "verification": [
+    "uv run python -m movieintel.serving.openapi",
+    "uv run pytest tests/serving/test_openapi.py",
+    "uv run ruff check . && uv run ruff format --check . && uv run mypy src"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}
