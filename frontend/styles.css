@@ -202,3 +202,78 @@ body {
   margin: 0.5rem 0 0;
   padding-left: 1.25rem;
 }
+
+/* Persistent help panel ("What can I ask?") below the status region. */
+.help-panel {
+  margin-top: 2rem;
+  padding: 1rem;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.help-heading {
+  margin: 0 0 0.25rem;
+  font-size: 1.1rem;
+}
+
+.help-intro {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+}
+
+/* Shared example list used by both the help panel and the contextual help. */
+.example-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.example-button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.example-button:hover {
+  border-color: var(--accent);
+}
+
+.example-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.example-group {
+  display: inline-block;
+  margin-right: 0.5rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+/* Contextual help shown inside the aria-live region on an unsatisfying result. */
+.contextual-help {
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.contextual-help-prompt {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+}
