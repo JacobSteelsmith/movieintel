@@ -19,8 +19,9 @@ const KNOWN_SENTIMENTS = ["positive", "negative", "neutral"];
 
 // Curated example questions - the SINGLE source of truth shared by BOTH the
 // persistent help panel and the contextual help shown on an unsatisfying result.
-// These exact strings are verified against the live data (97 movies) to return
-// real, non-empty results. Each supported AgentResult kind is represented. Do NOT
+// These exact strings are curated against the ingested dataset (a high-revenue
+// blockbuster-biased sample) to return real, non-empty results. Each supported
+// AgentResult kind is represented. Do NOT
 // add examples involving cast/actors or "lowest ranked" - the system has no cast
 // dimension and that path is unsupported.
 const HELP_EXAMPLES = [
