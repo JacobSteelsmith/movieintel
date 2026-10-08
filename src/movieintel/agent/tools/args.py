@@ -18,7 +18,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from movieintel.agent.tools.results import Dimension, SortBy, ToolValidationError
+from movieintel.agent.tools.results import Dimension, SortBy, SortDirection, ToolValidationError
 from movieintel.domain.schemas import Sentiment
 
 
@@ -36,6 +36,7 @@ class QueryMoviesArgs(BaseModel):
     max_runtime: float | None = None
     genres: list[str] | None = None
     sort_by: SortBy | None = None
+    sort_direction: SortDirection = "desc"
     limit: Annotated[int, Field(ge=1, le=50)] | None = None
 
 

@@ -79,6 +79,11 @@ def test_query_movies_enums_and_bounds() -> None:
     schema = _schema("query_movies")
     assert set(schema["properties"]["sentiment"]["enum"]) == {"positive", "negative", "neutral"}
     assert set(schema["properties"]["sort_by"]["enum"]) == {"pes", "revenue", "budget", "runtime"}
+    assert set(schema["properties"]["sort_direction"]["enum"]) == {"asc", "desc"}
+    # sort_direction is optional and defaults to "desc" on the args model (preserving the
+    # historical highest-first behavior when the model omits it).
+    assert QueryMoviesArgs.model_fields["sort_direction"].default == "desc"
+    assert QueryMoviesArgs.model_fields["sort_direction"].is_required() is False
     assert schema["properties"]["limit"]["minimum"] == 1
     assert schema["properties"]["limit"]["maximum"] == 50
     # No field is required (every arg is optional on query_movies).
