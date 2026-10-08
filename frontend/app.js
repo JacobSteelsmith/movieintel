@@ -17,6 +17,21 @@ const API_PLACEHOLDER = "https://REPLACE_ME.execute-api.us-east-1.amazonaws.com"
 const KNOWN_MOODS = ["dark", "light", "intense", "uplifting", "tense", "lighthearted"];
 const KNOWN_SENTIMENTS = ["positive", "negative", "neutral"];
 
+// Curated example questions - the SINGLE source of truth shared by BOTH the
+// persistent help panel and the contextual help shown on an unsatisfying result.
+// These exact strings are verified against the live data (97 movies) to return
+// real, non-empty results. Each supported AgentResult kind is represented. Do NOT
+// add examples involving cast/actors or "lowest ranked" - the system has no cast
+// dimension and that path is unsupported.
+const HELP_EXAMPLES = [
+  { group: "Recommendations", query: "Recommend action movies with high revenue and positive sentiment." },
+  { group: "Recommendations", query: "What are some lighthearted adventure movies?" },
+  { group: "Recommendations", query: "Show me intense, high-budget movies." },
+  { group: "Preferences", query: "Summarize the preferences of a viewer who enjoys big-budget blockbusters." },
+  { group: "Comparison", query: "Compare the two highest-rated movies by Production Effectiveness Score." },
+  { group: "Comparison", query: "Compare the two movies with the lowest budgets." },
+];
+
 // Poll loop tuning. The front end submits a job (POST /jobs -> 202) and then polls
 // GET /jobs/{id} until the job reaches a terminal status. Progress rendered into the
 // aria-live region is REAL per-phase telemetry written by the worker, not a timer.
@@ -42,6 +57,81 @@ function renderNotice(message, variant) {
   notice.className = variant ? `notice ${variant}` : "notice";
   notice.textContent = message;
   region.appendChild(notice);
+}
+
+// Click-to-fill: put the example question into the textarea and focus it. This
+// NEVER submits; the user still presses Ask. Shared by the persistent help panel
+// and the contextual help so there is one handler.
+function fillQuery(query) {
+  const input = document.getElementById("query-input");
+  if (!input) {
+    return;
+  }
+  input.value = query;
+  input.focus();
+}
+
+// Build a list of click-to-fill example <button type="button"> elements from the
+// shared HELP_EXAMPLES const. Real buttons so they are keyboard-operable and
+// announced to screen readers; each button text is set via textContent only.
+function buildExampleList() {
+  const list = document.createElement("ul");
+  list.className = "example-list";
+  HELP_EXAMPLES.forEach((example) => {
+    const li = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "example-button";
+    // Group label (e.g. "Comparison") precedes the question so the kind is
+    // discernible; both pieces are plain text nodes, never innerHTML.
+    const groupSpan = document.createElement("span");
+    groupSpan.className = "example-group";
+    groupSpan.textContent = example.group;
+    button.appendChild(groupSpan);
+    button.appendChild(document.createTextNode(example.query));
+    button.addEventListener("click", () => fillQuery(example.query));
+    li.appendChild(button);
+    list.appendChild(li);
+  });
+  return list;
+}
+
+// Render the persistent "Try these" help panel into its container (populated by
+// JS so the examples come from the one shared const). Idempotent: clears first.
+function renderHelpPanel() {
+  const panel = document.getElementById("help-panel");
+  if (!panel) {
+    return;
+  }
+  panel.replaceChildren();
+  const heading = document.createElement("h2");
+  heading.className = "help-heading";
+  heading.id = "help-heading";
+  heading.textContent = "What can I ask?";
+  panel.appendChild(heading);
+
+  const intro = document.createElement("p");
+  intro.className = "help-intro";
+  intro.textContent = "Try one of these - click to drop it into the box, then press Ask.";
+  panel.appendChild(intro);
+
+  panel.appendChild(buildExampleList());
+}
+
+// Shared contextual-help renderer: append a short "try rephrasing" message plus the
+// SAME curated examples (click-to-fill) to the aria-live region, after whatever
+// notice/result was already rendered. textContent only; no innerHTML.
+function appendContextualHelp(region, message) {
+  const help = document.createElement("div");
+  help.className = "contextual-help";
+
+  const prompt = document.createElement("p");
+  prompt.className = "contextual-help-prompt";
+  prompt.textContent = message;
+  help.appendChild(prompt);
+
+  help.appendChild(buildExampleList());
+  region.appendChild(help);
 }
 
 function makeBadge(labelText, valueText, className) {
@@ -84,20 +174,25 @@ function renderResult(body) {
       renderComparison(region, body);
       break;
     case "refusal":
-      // HTTP 200 refusal (RefusalResponse): neutral notice, no content.
+      // HTTP 200 refusal (RefusalResponse): neutral notice, no content. The notice
+      // still explains it was declined; contextual help then offers questions that
+      // DO work. renderNotice clears the region, so append help into it afterward.
       renderNotice(
         body.reason || "The request was declined and no content was produced.",
         "",
       );
+      appendContextualHelp(region, "Here are some questions I can answer:");
       break;
     case "bounded":
-      // HTTP 200 bounded (BoundedResponse): informational notice.
+      // HTTP 200 bounded (BoundedResponse): informational notice. Offer the examples
+      // as a simpler path the agent can finish.
       renderNotice(
         `${body.reason || "The agent stopped before finishing."} (turns used: ${
           body.turns_used
         })`,
         "",
       );
+      appendContextualHelp(region, "Try one of these instead:");
       break;
     default:
       renderNotice("Unexpected response from the service.", "error");
@@ -112,6 +207,15 @@ function renderRecommendations(region, body) {
   region.appendChild(heading);
 
   const movies = Array.isArray(body.movies) ? body.movies : [];
+  if (movies.length === 0) {
+    // A successful recommendations result with no movies: nothing to show, so
+    // offer the curated examples that are known to return matches.
+    appendContextualHelp(
+      region,
+      "I could not find matching movies for that. Try one of these:",
+    );
+    return;
+  }
   movies.forEach((movie) => {
     const card = document.createElement("article");
     // movie_id is the stable identity/key; not necessarily shown to the user.
@@ -158,6 +262,17 @@ function renderPreferences(region, body) {
   heading.textContent = body.subject ? `Preferences: ${body.subject}` : "Preferences";
   region.appendChild(heading);
 
+  const highlights = Array.isArray(body.highlights) ? body.highlights : [];
+  // Effectively empty: no summary and no highlights means there is nothing useful
+  // to show, so offer the curated examples instead of a blank card.
+  if (!body.summary && highlights.length === 0) {
+    appendContextualHelp(
+      region,
+      "I could not summarize preferences for that. Try one of these:",
+    );
+    return;
+  }
+
   const card = document.createElement("article");
   card.className = "card";
 
@@ -167,7 +282,6 @@ function renderPreferences(region, body) {
     card.appendChild(summary);
   }
 
-  const highlights = Array.isArray(body.highlights) ? body.highlights : [];
   if (highlights.length > 0) {
     const list = document.createElement("ul");
     list.className = "highlight-list";
@@ -189,10 +303,20 @@ function renderComparison(region, body) {
   heading.textContent = subjects.length ? `Comparison: ${subjects.join(" vs ")}` : "Comparison";
   region.appendChild(heading);
 
+  const dimensions = Array.isArray(body.dimensions) ? body.dimensions : [];
+  // Effectively empty: no dimensions and no narrative leaves nothing to compare,
+  // so offer the curated examples instead of a blank card.
+  if (dimensions.length === 0 && !body.narrative) {
+    appendContextualHelp(
+      region,
+      "I could not compare those. Try one of these:",
+    );
+    return;
+  }
+
   const card = document.createElement("article");
   card.className = "card";
 
-  const dimensions = Array.isArray(body.dimensions) ? body.dimensions : [];
   if (dimensions.length > 0) {
     const badges = document.createElement("div");
     badges.className = "badges";
@@ -421,8 +545,11 @@ async function onSubmit(event) {
   }
 
   if (response.status === 400) {
-    // ValidationErrorResponse: {error: 'invalid_request', detail: [...]}.
+    // ValidationErrorResponse: {error: 'invalid_request', detail: [...]}. The error
+    // notice stands; append the curated examples so a malformed/empty question has
+    // a clear way forward. renderNotice cleared the region, so append after it.
     renderNotice(extractValidationMessage(await safeJson(response)), "error");
+    appendContextualHelp(statusRegion(), "Here are some questions I can answer:");
     stopPolling();
     return;
   }
@@ -456,6 +583,8 @@ function init() {
 
   const form = document.getElementById("query-form");
   form.addEventListener("submit", onSubmit);
+  // Populate the persistent help panel from the shared HELP_EXAMPLES const.
+  renderHelpPanel();
   warmUp();
 }
 

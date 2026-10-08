@@ -45,6 +45,21 @@
         role="status"
         aria-live="polite"
       ></section>
+
+      <!--
+        Persistent help panel. Populated by app.js from the single shared
+        HELP_EXAMPLES const (same source the contextual help renders from).
+        Labelled by its heading (aria-labelledby) and holds real
+        <button type="button"> examples that are keyboard-operable and
+        announced to assistive technology. Clicking an example fills the
+        textarea and focuses it; it never auto-submits. Baseline affordances
+        only - full WCAG conformance requires manual AT testing and expert review.
+      -->
+      <section
+        id="help-panel"
+        class="help-panel"
+        aria-labelledby="help-heading"
+      ></section>
     </main>
 
     <!-- config.js MUST load before app.js so window.API_BASE_URL is defined. -->
