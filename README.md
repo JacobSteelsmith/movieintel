@@ -4,10 +4,7 @@ An LLM-integrated movie intelligence system built on Amazon Bedrock: a batch
 data-enrichment pipeline (Subsystem A) and an agentic + RAG serving system
 (Subsystem B), both defined in AWS CDK (Python) and both scale-to-zero.
 
-This README is the technical brief for the project (REQ-X-7). The authoritative
-specification lives under [`_docs/spec/`](_docs/spec/):
-[requirements](_docs/spec/requirements.md), [design](_docs/spec/design.md), and
-[tasks](_docs/spec/tasks.md).
+This README is the technical brief for the project (REQ-X-7). 
 
 ## 1. Problem statement
 
