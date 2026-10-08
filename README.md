@@ -269,14 +269,47 @@ return a structured 200 in roughly 22-23s. (A `postman_collection.json` is in
 [`docs/examples/`](docs/examples/) and the contract is in
 [`docs/openapi.yaml`](docs/openapi.yaml).)
 
+The API carries a browser CORS preflight config, but direct non-browser clients (curl,
+Postman) are unaffected by CORS and query `POST /query` exactly as shown above.
+
+#### Warm-up endpoint
+
+```bash
+curl -sS "$API_URL/health"   # -> {"status": "ok"}
+```
+
+`GET /health` short-circuits in the serving handler and returns a fast `200` **without**
+invoking the agent loop, Bedrock, DynamoDB, or the Knowledge Base. It warms the real
+serving Lambda container, so firing it before a real `POST /query` (for example on front
+end page load) absorbs the init cold start. It does not shorten the agent loop's own run
+time.
+
+#### Web front end
+
+A static web client is hosted on CloudFront in front of a private S3 bucket (the
+`MovieIntelFrontendStack`):
+
+```
+https://d2scp65e5pkne3.cloudfront.net
+```
+
+On load it pings `GET /health` to warm the backend, then posts queries to `POST /query`
+and renders the structured `AgentResult`, showing staged progress while the request is in
+flight. The API base URL it calls is set in [`frontend/config.js`](frontend/config.js)
+from the `MovieIntelServingStack` `ServingApiUrl` output.
+
+> Known limitation: the agent loop can still exceed the API Gateway HTTP API 30s
+> integration timeout on heavy queries and return `503`, independent of cold start. See
+> section 8.
+
 ### Destroy
 
 ```bash
 cd infra
-npx aws-cdk@2 destroy MovieIntelServingStack KnowledgeBaseStack MovieIntelPipelineStack
+npx aws-cdk@2 destroy MovieIntelFrontendStack MovieIntelServingStack KnowledgeBaseStack MovieIntelPipelineStack
 ```
 
-Destroy in reverse dependency order (serving, then KB, then pipeline). See
+Destroy in reverse dependency order (frontend, then serving, then KB, then pipeline). See
 [`docs/cost-and-teardown.md`](docs/cost-and-teardown.md) for the teardown checklist and
 lingering-resource notes.
 
@@ -357,13 +390,23 @@ result from a warm smoke check (truncated to the top two movies):
 
 ## 8. Known limitations and future work
 
-- **Cold-start 503 on synchronous POST /query.** The agent loop runs ~22-23s warm, but the
-  HTTP API integration timeout is hard-capped at 30s, so a cold start can exceed it and
-  return an unstructured 503; warm calls return a structured 200. Options: warm before the
-  demo [chosen]; reduce loop latency / `max_turns`; provisioned concurrency [breaks
-  scale-to-zero]; async 202 + poll/callback [correct at scale, changes the contract];
-  raising the gateway timeout [not viable, hard-capped]. **Recommendation:** document and
-  warm for the demo; move to async serving for production.
+- **30s integration-timeout 503 on synchronous POST /query.** The API Gateway HTTP API
+  integration timeout is hard-capped at 30s. The multi-turn agent loop runs one sequential
+  Bedrock Converse round trip (plus tool calls) per turn, so wall-clock latency grows with
+  the executed turn count. Two things can push a request past 30s: a cold start (absorbed by
+  warming `GET /health` or a throwaway `POST /query` first), AND the loop's own run time on
+  heavier queries even when warm. When the request exceeds 30s the gateway returns an
+  unstructured `503 {"message":"Service Unavailable"}` while the Lambda (300s timeout) keeps
+  running and completes in the background, which is why a retry often succeeds. CloudWatch
+  confirms this: successful invocations of 30.6s and 31.7s with `IntegrationLatency` maxing
+  at exactly 30000ms and matching `5xx` counts. Options: warm before the demo [chosen for
+  cold start]; reduce loop latency / clamp `max_turns` server-side [implemented on the
+  `fix/serving-max-turns-clamp` branch, held pending the async work]; a faster model (Haiku)
+  for the loop; provisioned concurrency [breaks scale-to-zero]; async 202 + poll/callback or
+  response streaming via a Lambda Function URL [correct at scale, not bound by the 30s cap,
+  changes the contract]; raising the gateway timeout [not viable, hard-capped].
+  **Recommendation:** warm for the demo; move to async/streaming serving for production so
+  variable loop latency is no longer bounded by the 30s gateway wall.
 - **Enrichment skip rate and the Guardrail-config journey.** The latest clean-slate run of
   the 100-movie high-revenue sample passes 97/100 (`schema_validation` 0.97), with ~3 items
   tolerated by the per-item Catch. Getting there surfaced two real Guardrail misconfigurations
