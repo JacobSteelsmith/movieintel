@@ -1,7 +1,7 @@
 {
   "task_id": "task-async-serving",
   "task_description": "Add an async submit-then-poll serving path to MovieIntel to eliminate the 30s API Gateway integration-timeout 503 on POST /query. Add a backward-compatible on_progress callback to the agent loop, a DynamoDB-backed job store under a JOB# keyspace, a submit (POST /jobs, 202 + async worker invoke) and poll (GET /jobs/{id}) handler, a worker Lambda running run_agent to completion with real per-phase progress and a guaranteed terminal record, CDK wiring (submit+worker Lambdas, two routes, least-privilege IAM, table TTL), a front-end submit-then-poll rewrite, and regenerated docs. POST /query and GET /health are unchanged.",
-  "status": "pending",
+  "status": "completed",
   "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004", "FEAT-005"],
   "blocked_reason": null
 }
