@@ -20,6 +20,8 @@ from movieintel.domain.schemas import Mood, PESTier, Sentiment
 # The comparable numeric dimensions, shared by the compare_movies args + result (§3.6).
 Dimension = Literal["budget", "revenue", "runtime", "pes"]
 SortBy = Literal["pes", "revenue", "budget", "runtime"]
+# Ordering direction for query_movies: "desc" (default, highest first) or "asc" (lowest first).
+SortDirection = Literal["asc", "desc"]
 
 
 class ToolValidationError(BaseModel):

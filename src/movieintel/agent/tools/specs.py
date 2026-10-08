@@ -40,6 +40,14 @@ QUERY_MOVIES_SPEC: dict[str, Any] = {
                         "type": "string",
                         "enum": ["pes", "revenue", "budget", "runtime"],
                     },
+                    "sort_direction": {
+                        "type": "string",
+                        "enum": ["asc", "desc"],
+                        "description": (
+                            "Sort direction: 'desc' (default, highest first) or 'asc' "
+                            "(lowest first)."
+                        ),
+                    },
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                 },
                 "additionalProperties": False,

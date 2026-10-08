@@ -30,6 +30,7 @@ from movieintel.agent.tools.results import (
     QueryMoviesMovie,
     QueryMoviesResult,
     SortBy,
+    SortDirection,
     ToolValidationError,
 )
 from movieintel.persistence.item import EnrichedMovie
@@ -72,7 +73,7 @@ def query_movies(
         records = [r for r in records if _matches_genres(r, validated.genres)]
 
     sort_by: SortBy = validated.sort_by or _DEFAULT_SORT
-    records = _sort_records(records, sort_by, used_index)
+    records = _sort_records(records, sort_by, validated.sort_direction, used_index)
 
     if validated.limit is not None:
         records = records[: validated.limit]
@@ -128,19 +129,26 @@ def _sort_key(record: EnrichedMovie, sort_by: SortBy) -> float | None:
 
 
 def _sort_records(
-    records: list[EnrichedMovie], sort_by: SortBy, used_index: bool
+    records: list[EnrichedMovie],
+    sort_by: SortBy,
+    sort_direction: SortDirection,
+    used_index: bool,
 ) -> list[EnrichedMovie]:
-    """Sort descending with ``None`` values last; PES on the GSI is already ordered.
+    """Sort by ``sort_by`` in ``sort_direction`` with ``None`` values always last.
 
     When ``sort_by == "pes"`` and the GSI (sentiment) path was used, the records already
-    arrive PES-descending, so re-sorting is unnecessary and the GSI order is preserved.
+    arrive PES-descending, so a ``"desc"`` request preserves the GSI order with no re-sort;
+    an ``"asc"`` request re-sorts the small result set in Python (ascending) rather than
+    returning the descending index order, so ``sort_direction`` is honored even for PES.
     """
-    if sort_by == "pes" and used_index:
+    if sort_by == "pes" and used_index and sort_direction == "desc":
         return records
-    # None sorts last regardless of direction: (is_missing, -value).
+    # None sorts last regardless of direction; the numeric sign flips for ascending so the
+    # lowest value leads while missing values stay at the end: (is_missing, sign * value).
+    sign = 1.0 if sort_direction == "asc" else -1.0
     return sorted(
         records,
-        key=lambda r: (_sort_key(r, sort_by) is None, -(_sort_key(r, sort_by) or 0.0)),
+        key=lambda r: (_sort_key(r, sort_by) is None, sign * (_sort_key(r, sort_by) or 0.0)),
     )
 
 

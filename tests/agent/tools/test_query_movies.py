@@ -132,6 +132,59 @@ def test_sort_by_revenue_orders_descending_with_none_last(
     assert [m.movie_id for m in result.movies] == ["11", "10", "12"]
 
 
+def test_sort_by_budget_ascending_returns_lowest_first(
+    repository: MovieIntelRepository,
+) -> None:
+    _seed(repository)
+    result = query_movies(
+        {"sentiment": "positive", "sort_by": "budget", "sort_direction": "asc"},
+        repository=repository,
+    )
+    assert isinstance(result, QueryMoviesResult)
+    assert result.sort_by == "budget"
+    # Positive movies by budget: 3 (1M), 1 (2M), 2 (3M) -> ascending is cheapest first.
+    assert [m.movie_id for m in result.movies] == ["3", "1", "2"]
+
+
+def test_sort_by_budget_defaults_to_descending(repository: MovieIntelRepository) -> None:
+    _seed(repository)
+    # Omitting sort_direction must preserve today's highest-first behavior (regression guard).
+    result = query_movies({"sentiment": "positive", "sort_by": "budget"}, repository=repository)
+    assert isinstance(result, QueryMoviesResult)
+    assert [m.movie_id for m in result.movies] == ["2", "1", "3"]
+
+
+def test_ascending_keeps_none_values_last(repository: MovieIntelRepository) -> None:
+    repository.put(
+        make_enriched(movie_id=20, pes_value=10.0, sentiment=Sentiment.POSITIVE, revenue=3_000_000)
+    )
+    repository.put(
+        make_enriched(movie_id=21, pes_value=20.0, sentiment=Sentiment.POSITIVE, revenue=7_000_000)
+    )
+    repository.put(
+        make_enriched(movie_id=22, pes_value=30.0, sentiment=Sentiment.POSITIVE, revenue=None)
+    )
+    result = query_movies(
+        {"sentiment": "positive", "sort_by": "revenue", "sort_direction": "asc"},
+        repository=repository,
+    )
+    assert isinstance(result, QueryMoviesResult)
+    # Ascending by revenue: 20 (3M), 21 (7M), then the missing-value movie 22 stays LAST.
+    assert [m.movie_id for m in result.movies] == ["20", "21", "22"]
+
+
+def test_ascending_pes_honored_on_gsi_path(repository: MovieIntelRepository) -> None:
+    _seed(repository)
+    # PES over the sentiment/GSI path defaults to descending (index order); an ascending
+    # request must re-sort in Python rather than returning the descending index order.
+    result = query_movies({"sentiment": "positive", "sort_direction": "asc"}, repository=repository)
+    assert isinstance(result, QueryMoviesResult)
+    assert result.used_index is True
+    assert result.sort_by == "pes"
+    # Positive PES values: 90 (1), 70 (3), 50 (2) -> ascending is lowest PES first.
+    assert [m.movie_id for m in result.movies] == ["2", "3", "1"]
+
+
 def test_dispatches_to_scan_when_no_sentiment() -> None:
     stub = StubRepository(scan_result=[make_enriched(movie_id=1, pes_value=5.0)])
     result = query_movies({"min_budget": 1.0}, repository=stub)
