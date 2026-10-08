@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "MovieIntel Serving API",
-    "description": "Example requests for the MovieIntel POST /query serving endpoint (Task 10 FEAT-001, REQ-B-4.3). Set the API_URL collection variable to the deployed base URL (no trailing slash). All bodies match the QueryRequest schema in docs/openapi.yaml.",
+    "description": "Example requests for the MovieIntel serving endpoints (REQ-B-4.3). The recommended path is async submit-then-poll (POST /jobs -> GET /jobs/{{job_id}}), which avoids the 30s-wall 503; synchronous POST /query is the legacy path. Set the API_URL collection variable to the deployed base URL (no trailing slash). All bodies match the QueryRequest schema in docs/openapi.yaml. Run the Submit job request first - its test script saves job_id into a collection variable so the Poll job request can run immediately after.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -9,11 +9,65 @@
       "key": "API_URL",
       "value": "https://example.execute-api.us-east-1.amazonaws.com/prod",
       "type": "string"
+    },
+    {
+      "key": "job_id",
+      "value": "",
+      "type": "string"
     }
   ],
   "item": [
     {
-      "name": "Recommendation query",
+      "name": "Submit job (async, recommended)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "var body = pm.response.json();",
+              "pm.test('202 Accepted with a job_id', function () {",
+              "  pm.response.to.have.status(202);",
+              "  pm.expect(body).to.have.property('job_id');",
+              "});",
+              "pm.collectionVariables.set('job_id', body.job_id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "content-type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{API_URL}}/jobs",
+          "host": ["{{API_URL}}"],
+          "path": ["jobs"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"query\": \"Recommend action movies with high revenue and positive sentiment.\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "description": "Expect HTTP 202 with {job_id, status: queued, poll_url}. The test script saves job_id into the collection variable; run Poll job next. This async path is not bound by the 30s gateway integration timeout."
+      }
+    },
+    {
+      "name": "Poll job (async, recommended)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{API_URL}}/jobs/{{job_id}}",
+          "host": ["{{API_URL}}"],
+          "path": ["jobs", "{{job_id}}"]
+        },
+        "description": "Expect HTTP 200 with {job_id, status, progress, ...}. While status is queued/running the body carries a per-phase progress object; when terminal it carries either a 5-kind AgentResult (status=succeeded) or a structured error (status=failed). An unknown id returns 404. Send repeatedly until status is succeeded or failed."
+      }
+    },
+    {
+      "name": "Recommendation query (synchronous, legacy)",
       "request": {
         "method": "POST",
         "header": [
