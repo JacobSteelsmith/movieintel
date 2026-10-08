@@ -10,6 +10,7 @@ the same region (us-east-1).
 from __future__ import annotations
 
 import aws_cdk as cdk
+from frontend_stack import MovieIntelFrontendStack
 from knowledge_base_stack import KnowledgeBaseStack
 from pipeline_stack import MovieIntelPipelineStack
 from serving_stack import MovieIntelServingStack
@@ -29,6 +30,11 @@ KnowledgeBaseStack(
 MovieIntelServingStack(
     app,
     "MovieIntelServingStack",
+    env=env,
+)
+MovieIntelFrontendStack(
+    app,
+    "MovieIntelFrontendStack",
     env=env,
 )
 app.synth()
