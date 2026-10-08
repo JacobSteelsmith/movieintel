@@ -52,6 +52,18 @@ def test_single_on_demand_table_with_gsi1(template: Template) -> None:
     )
 
 
+def test_table_has_ttl_on_expires_at(template: Template) -> None:
+    """The MovieIntel table enables DynamoDB TTL on the ``expires_at`` attribute.
+
+    Async-job records (design Decision 2) carry an ``expires_at`` epoch-seconds attribute
+    so DynamoDB reaps them automatically; existing movie items without it never expire.
+    """
+    template.has_resource_properties(
+        "AWS::DynamoDB::Table",
+        {"TimeToLiveSpecification": {"AttributeName": "expires_at", "Enabled": True}},
+    )
+
+
 def test_state_machine_orders_states_and_has_map_catch(template: Template) -> None:
     """The state machine definition orders the seven states and has a Map Catch.
 

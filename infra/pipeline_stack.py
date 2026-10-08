@@ -115,6 +115,10 @@ class MovieIntelPipelineStack(Stack):
             sort_key=dynamodb.Attribute(name="SK", type=dynamodb.AttributeType.STRING),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.DESTROY,
+            # Async-job records (JOB# keyspace) carry an expires_at epoch-seconds attribute
+            # so DynamoDB TTL reaps them automatically (design Decision 2). Backward
+            # compatible: existing movie items have no expires_at and never expire.
+            time_to_live_attribute="expires_at",
         )
         table.add_global_secondary_index(
             index_name=self.persistence.gsi1_name,
