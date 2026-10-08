@@ -1,0 +1,24 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "id": 1,
+      "severity": "NIT",
+      "title": "curl.sh poll loop uses `[ ... ] || [ ... ] && break` without an explicit if guard",
+      "where": "Docs section, curl.sh snippet",
+      "problem": "Under `set -euo pipefail` the `[ ... ] || [ ... ] && break` chain is correct for breaking but yields a non-zero exit when neither branch matches; it is safe only because `sleep` follows and resets $?. Fragile but not blocking (documentation example).",
+      "fix": "Use an explicit guard: `if [ \"$status\" = succeeded ] || [ \"$status\" = failed ]; then break; fi`."
+    }
+  ],
+  "resolvedPriorFindings": [
+    {"priorSeverity": "HIGH", "title": "JobStore.get explicit projected payload (reconstruct job_id from arg; exclude PK/SK/query/max_turns/expires_at; progress+result+error through _from_dynamo)", "status": "RESOLVED"},
+    {"priorSeverity": "MEDIUM", "title": "job_id = uuid4().hex everywhere; PK JOB#<hex>; poll_url /jobs/<hex>; all examples hex", "status": "RESOLVED"},
+    {"priorSeverity": "MEDIUM", "title": "progress.turn Decimal normalization via _from_dynamo with round-trip test (turn==2 int, float pes result)", "status": "RESOLVED"},
+    {"priorSeverity": "NIT", "title": "AgentResult|None smart-union confirmed, no TypeAdapter", "status": "RESOLVED"},
+    {"priorSeverity": "NIT", "title": "progress-write throttle rule chosen (write on phase OR turn change)", "status": "RESOLVED"},
+    {"priorSeverity": "NIT", "title": "tests under tests/serving reusing moto_repository + FakeLambdaClient", "status": "RESOLVED"},
+    {"priorSeverity": "NIT", "title": "poll route catches raising JobStore.get -> 500 poll_failed logged at error", "status": "RESOLVED"},
+    {"priorSeverity": "NIT", "title": "nested WorkerError terminal-failure body shape documented as intentional", "status": "RESOLVED"}
+  ],
+  "reviewDoc": "/home/jacob/code/aetna/.worktrees/async-serving/.agents/tasks/async-serving/design-review.md"
+}

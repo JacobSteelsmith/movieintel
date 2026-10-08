@@ -63,6 +63,76 @@ def test_agent_result_member_schemas_are_present() -> None:
         assert name in schemas, name
 
 
+def test_build_openapi_documents_submit_jobs_path() -> None:
+    spec = build_openapi()
+    assert "/jobs" in spec["paths"]
+    post = spec["paths"]["/jobs"]["post"]
+    # Reuses the QueryRequest body.
+    request_schema = post["requestBody"]["content"]["application/json"]["schema"]
+    assert request_schema["$ref"].endswith("/QueryRequest")
+    responses = post["responses"]
+    assert "202" in responses
+    assert "400" in responses
+    accepted_schema = responses["202"]["content"]["application/json"]["schema"]
+    assert accepted_schema["$ref"].endswith("/SubmitResponse")
+    error_schema = responses["400"]["content"]["application/json"]["schema"]
+    assert error_schema["$ref"].endswith("/ValidationErrorResponse")
+
+
+def test_build_openapi_documents_poll_job_path() -> None:
+    spec = build_openapi()
+    assert "/jobs/{id}" in spec["paths"]
+    get = spec["paths"]["/jobs/{id}"]["get"]
+    # A required path parameter named 'id' of type string.
+    params = get["parameters"]
+    id_param = next(p for p in params if p["name"] == "id")
+    assert id_param["in"] == "path"
+    assert id_param["required"] is True
+    assert id_param["schema"]["type"] == "string"
+    responses = get["responses"]
+    assert "200" in responses
+    assert "404" in responses
+    status_schema = responses["200"]["content"]["application/json"]["schema"]
+    assert status_schema["$ref"].endswith("/JobStatusResponse")
+    not_found_schema = responses["404"]["content"]["application/json"]["schema"]
+    assert not_found_schema["$ref"].endswith("/NotFoundResponse")
+
+
+def test_health_path_is_not_documented() -> None:
+    # The generator intentionally omits /health.
+    assert "/health" not in build_openapi()["paths"]
+
+
+def test_job_component_schemas_are_present() -> None:
+    spec = build_openapi()
+    schemas = spec["components"]["schemas"]
+    for name in (
+        "SubmitResponse",
+        "JobStatusResponse",
+        "JobProgress",
+        "WorkerError",
+        "NotFoundResponse",
+        # The enums come along as $defs via model_json_schema.
+        "ProgressPhase",
+        "JobStatus",
+    ):
+        assert name in schemas, name
+
+
+def test_job_status_response_embeds_agent_result_union() -> None:
+    spec = build_openapi()
+    schemas = spec["components"]["schemas"]
+    # JobStatusResponse.result references the AgentResult union schema.
+    result_field = schemas["JobStatusResponse"]["properties"]["result"]
+    refs = {sub.get("$ref", "") for sub in result_field["anyOf"]}
+    assert any(ref.endswith("/AgentResult") for ref in refs)
+    # The AgentResult schema is the five-member union over the result models.
+    agent_result = schemas["AgentResult"]
+    members = agent_result.get("oneOf") or agent_result.get("anyOf")
+    assert members is not None
+    assert len(members) == 5
+
+
 def test_rendered_yaml_parses_as_json() -> None:
     rendered = render_openapi_yaml()
     # JSON-compatible YAML: parseable by the stdlib json module.

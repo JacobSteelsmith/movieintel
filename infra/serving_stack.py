@@ -84,6 +84,15 @@ QUERY_ROUTE_PATH = "/query"
 #: inside the handler before the agent loop.
 HEALTH_ROUTE_PATH = "/health"
 
+#: Async submit route (POST /jobs) - creates a job, async-invokes the worker, returns 202.
+#: Both /jobs routes are served by the SAME SubmitFn (mirroring how ServingFn serves both
+#: /query and /health).
+JOBS_ROUTE_PATH = "/jobs"
+
+#: Async poll route (GET /jobs/{id}) - a single DynamoDB GetItem. ``{id}`` is a standard
+#: HTTP API v2 path variable the handler reads from ``event['pathParameters']['id']``.
+JOB_POLL_ROUTE_PATH = "/jobs/{id}"
+
 #: CDK context key + default for the CORS allow-origin on the HTTP API's preflight.
 CORS_ALLOW_ORIGIN_CONTEXT_KEY = "cors_allow_origin"
 # design 2.5: '*' is a first-deploy placeholder. A wildcard origin is incompatible with
@@ -111,6 +120,11 @@ class MovieIntelServingStack(Stack):
         self.shared_layer = self._shared_layer()
         self.serving_function = self._serving_lambda()
         self._grant_iam()
+        # Async submit-then-poll path (design Decision 1/3): build the worker FIRST so the
+        # submit function can reference its name/ARN for the Event-type invoke.
+        self.worker_function = self._worker_lambda()
+        self.submit_function = self._submit_lambda()
+        self._grant_async_iam()
         self.api = self._http_api()
         self.web_acl = self._waf()
         self._outputs()
@@ -212,6 +226,59 @@ class MovieIntelServingStack(Stack):
             memory_size=1024,
         )
 
+    def _worker_lambda(self) -> lambda_.Function:
+        """The async worker Lambda (PYTHON_3_12, shared layer, agent-loop sized).
+
+        Runs ``run_agent`` to completion and writes real per-phase progress + the terminal
+        job record. It carries the full serving env (model/guardrail/KB/table) and the same
+        300s timeout / 1024MB sizing as ``ServingFn``. It is NOT wired to any API route - it
+        is invoked only asynchronously (InvocationType='Event') by ``SubmitFn``. No
+        ``_sqlite`` layer (it never touches the source DBs); scales to zero.
+        """
+        return lambda_.Function(
+            self,
+            "WorkerFn",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handlers.worker.handler.handler",
+            code=lambda_.Code.from_asset(
+                str(INFRA_DIR),
+                exclude=HANDLER_ASSET_EXCLUDES,
+            ),
+            layers=[self.shared_layer],
+            environment=self._environment(),
+            timeout=Duration.minutes(5),
+            memory_size=1024,
+        )
+
+    def _submit_lambda(self) -> lambda_.Function:
+        """The fast submit/poll Lambda (PYTHON_3_12, shared layer, scale-to-zero).
+
+        Handles ``POST /jobs`` (validate + write a queued record + async-invoke the worker,
+        202) and ``GET /jobs/{id}`` (single GetItem poll). It never runs the agent loop, so
+        it is sized small (10s timeout, 256MB) and gets no Bedrock grant. Its env points at
+        the worker (for the Event invoke) and the job table/GSI. The worker MUST exist
+        before this runs so ``WORKER_FUNCTION_NAME`` resolves.
+        """
+        submit = lambda_.Function(
+            self,
+            "SubmitFn",
+            runtime=lambda_.Runtime.PYTHON_3_12,
+            handler="handlers.submit.handler.handler",
+            code=lambda_.Code.from_asset(
+                str(INFRA_DIR),
+                exclude=HANDLER_ASSET_EXCLUDES,
+            ),
+            layers=[self.shared_layer],
+            environment={
+                "MOVIEINTEL_TABLE_NAME": self.persistence.table_name,
+                "MOVIEINTEL_GSI1_NAME": self.persistence.gsi1_name,
+            },
+            timeout=Duration.seconds(10),
+            memory_size=256,
+        )
+        submit.add_environment("WORKER_FUNCTION_NAME", self.worker_function.function_name)
+        return submit
+
     # -- IAM ------------------------------------------------------------------
 
     def _grant_iam(self) -> None:
@@ -262,6 +329,83 @@ class MovieIntelServingStack(Stack):
             )
         )
 
+    def _grant_async_iam(self) -> None:
+        """Least-privilege IAM for the async submit + worker roles (design 'IAM' section).
+
+        SubmitFn is the fast path: it only writes/reads a single job item by PK/SK and
+        async-invokes the worker, so it gets NO Bedrock grant, NO GSI1, and NO
+        Query/Scan/BatchGetItem. WorkerFn mirrors the ServingFn Bedrock/KB/DynamoDB tool
+        surface plus the job-write actions. No ``bedrock:*`` and no Resource ``*`` anywhere.
+        """
+        region = self.region
+        account = self.account
+        table_arn = f"arn:aws:dynamodb:{region}:{account}:table/{self.persistence.table_name}"
+        index_arn = f"{table_arn}/index/{self.persistence.gsi1_name}"
+
+        # -- SubmitFn ---------------------------------------------------------
+        # S1: job keyspace writes/reads on the base table ARN ONLY (no GSI1, no
+        # Query/Scan/BatchGetItem) - the submit path touches a single job item by PK/SK.
+        self.submit_function.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"],
+                resources=[table_arn],
+            )
+        )
+        # S2: dispatch the worker. grant_invoke scopes lambda:InvokeFunction to the worker
+        # function ARN (least privilege).
+        self.worker_function.grant_invoke(self.submit_function)
+
+        # -- WorkerFn ---------------------------------------------------------
+        # W1: Bedrock model (identical to the ServingFn grant).
+        self.worker_function.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["bedrock:InvokeModel"],
+                resources=bedrock_invoke_model_resources(region, account),
+            )
+        )
+        # W2: guardrail on the in-stack serving guardrail ARN.
+        self.worker_function.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["bedrock:ApplyGuardrail"],
+                resources=[self.guardrail.attr_guardrail_arn],
+            )
+        )
+        # W3: KB retrieve on the deployed knowledge base.
+        self.worker_function.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["bedrock:Retrieve"],
+                resources=[
+                    f"arn:aws:bedrock:{region}:{account}:knowledge-base/{DEPLOYED_KNOWLEDGE_BASE_ID}"
+                ],
+            )
+        )
+        # W4: DynamoDB tool reads on the table + GSI1 (identical to the ServingFn grant).
+        self.worker_function.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "dynamodb:GetItem",
+                    "dynamodb:BatchGetItem",
+                    "dynamodb:Query",
+                    "dynamodb:Scan",
+                ],
+                resources=[table_arn, index_arn],
+            )
+        )
+        # W5: DynamoDB job writes on the base table ARN only. The GetItem here overlaps W4's
+        # GetItem - acceptable; the two statements have different resource scopes.
+        self.worker_function.add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"],
+                resources=[table_arn],
+            )
+        )
+
     # -- API ------------------------------------------------------------------
 
     def _cors_allow_origin(self) -> str:
@@ -309,6 +453,24 @@ class MovieIntelServingStack(Stack):
             path=HEALTH_ROUTE_PATH,
             methods=[apigwv2.HttpMethod.GET],
             integration=integration,
+        )
+
+        # Async submit-then-poll routes on the SAME HTTP API (design Decision 1). Both go
+        # to one SubmitFn integration, mirroring how ServingFn serves /query + /health.
+        # CORS/WAF inherit at the API level, so no per-route change is needed.
+        submit_integration = apigwv2_integrations.HttpLambdaIntegration(
+            "SubmitIntegration",
+            handler=self.submit_function,
+        )
+        api.add_routes(
+            path=JOBS_ROUTE_PATH,
+            methods=[apigwv2.HttpMethod.POST],
+            integration=submit_integration,
+        )
+        api.add_routes(
+            path=JOB_POLL_ROUTE_PATH,
+            methods=[apigwv2.HttpMethod.GET],
+            integration=submit_integration,
         )
         return api
 
@@ -393,4 +555,13 @@ class MovieIntelServingStack(Stack):
             "ServingApiUrl",
             value=self.api.api_endpoint,
             description="Base URL of the movieintel serving HTTP API - POST /query to invoke.",
+        )
+        CfnOutput(
+            self,
+            "ServingSubmitUrl",
+            value=f"{self.api.api_endpoint}{JOBS_ROUTE_PATH}",
+            description=(
+                "Async submit route - POST /jobs returns 202 + a poll_url; "
+                "GET /jobs/{id} polls job status."
+            ),
         )

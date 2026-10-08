@@ -15,6 +15,7 @@ constructs a real boto3 client under test.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 
@@ -26,6 +27,7 @@ from movieintel.config import BedrockConfig
 from movieintel.kb.config import KBConfig
 from movieintel.persistence.config import PersistenceConfig
 from movieintel.persistence.repository import MovieIntelRepository
+from movieintel.serving.jobs_store import JobStore
 
 # Re-export the scripted Converse fake + builders and the repo/KB stubs so serving tests
 # import them from one place (mirrors how ``tests/agent/conftest.py`` re-exports them).
@@ -43,6 +45,7 @@ from tests.agent.conftest import (
 __all__ = [
     "CapturingConverseClient",
     "FakeAgentRuntime",
+    "FakeLambdaClient",
     "StubRepository",
     "bedrock_config",
     "converse_final",
@@ -50,10 +53,39 @@ __all__ = [
     "converse_tool_use",
     "kb_config",
     "make_enriched",
+    "moto_job_store",
     "moto_repository",
     "persistence_config",
     "tool_use_block",
 ]
+
+
+class FakeLambdaClient:
+    """A boto3 ``lambda`` client double recording each ``invoke`` without dispatching.
+
+    Each call captures the ``FunctionName``, ``InvocationType``, and the DECODED JSON
+    ``Payload`` so the submit test can assert exactly one ``Event`` invoke with the right
+    ``job_id``/``query``/``max_turns``. Set ``raise_on_invoke=True`` to simulate an
+    async-invoke failure (the submit handler then marks the job ``failed`` and still 202s).
+    """
+
+    def __init__(self, *, raise_on_invoke: bool = False) -> None:
+        self.raise_on_invoke = raise_on_invoke
+        self.invocations: list[dict[str, Any]] = []
+
+    def invoke(self, **kwargs: Any) -> dict[str, Any]:
+        payload: Any = kwargs.get("Payload")
+        decoded = json.loads(payload.decode() if isinstance(payload, bytes) else payload)
+        self.invocations.append(
+            {
+                "FunctionName": kwargs.get("FunctionName"),
+                "InvocationType": kwargs.get("InvocationType"),
+                "Payload": decoded,
+            }
+        )
+        if self.raise_on_invoke:
+            raise RuntimeError("simulated async invoke failure")
+        return {"StatusCode": 202}
 
 
 @pytest.fixture
@@ -111,6 +143,39 @@ def moto_repository(persistence_config: PersistenceConfig) -> Iterator[MovieInte
         )
         table.wait_until_exists()
         yield MovieIntelRepository(table=table, config=persistence_config)
+
+
+@pytest.fixture
+def moto_job_store(persistence_config: PersistenceConfig) -> Iterator[JobStore]:
+    """A :class:`JobStore` over a moto ``MovieIntel`` table (same schema as ``moto_repository``)."""
+    with mock_aws():
+        resource = boto3.resource("dynamodb", region_name=persistence_config.region)
+        table = resource.create_table(
+            TableName=persistence_config.table_name,
+            KeySchema=[
+                {"AttributeName": "PK", "KeyType": "HASH"},
+                {"AttributeName": "SK", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "PK", "AttributeType": "S"},
+                {"AttributeName": "SK", "AttributeType": "S"},
+                {"AttributeName": "GSI1PK", "AttributeType": "S"},
+                {"AttributeName": "GSI1SK", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": persistence_config.gsi1_name,
+                    "KeySchema": [
+                        {"AttributeName": "GSI1PK", "KeyType": "HASH"},
+                        {"AttributeName": "GSI1SK", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        table.wait_until_exists()
+        yield JobStore(table=table, config=persistence_config)
 
 
 def _recommendations_payload() -> dict[str, Any]:

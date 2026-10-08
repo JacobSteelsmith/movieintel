@@ -17,19 +17,17 @@ const API_PLACEHOLDER = "https://REPLACE_ME.execute-api.us-east-1.amazonaws.com"
 const KNOWN_MOODS = ["dark", "light", "intense", "uplifting", "tense", "lighthearted"];
 const KNOWN_SENTIMENTS = ["positive", "negative", "neutral"];
 
-// Client-side heuristic progress timeline. This is NOT backend telemetry: the API
-// is a single synchronous request/response with a long (~22-23s) cold-start wait,
-// so these messages are purely time-based guesses to reassure the user. Each entry
-// is {at: millisecondsSinceSubmit, text}. The timeline is cleared the moment fetch
-// resolves (success OR error), regardless of which stage is current.
-const STAGES = [
-  { at: 0, text: "Warming up the model..." },
-  { at: 2000, text: "Understanding your question..." },
-  { at: 6000, text: "Searching the movie catalog..." },
-  { at: 14000, text: "Composing your answer..." },
-];
+// Poll loop tuning. The front end submits a job (POST /jobs -> 202) and then polls
+// GET /jobs/{id} until the job reaches a terminal status. Progress rendered into the
+// aria-live region is REAL per-phase telemetry written by the worker, not a timer.
+const POLL_INTERVAL_MS = 1200;
+const MAX_POLL_ATTEMPTS = 150; // ~180s of polling at the base interval.
+const BACKOFF_STEP_MS = 500;
+const MAX_BACKOFF_MS = 3000;
 
-let stageTimer = null;
+// Single setTimeout handle for the recursive poll loop (replaces the old stage-timer
+// array). stopPolling() clears it and re-enables the submit button exactly once.
+let pollHandle = null;
 
 function statusRegion() {
   return document.getElementById("status");
@@ -44,23 +42,6 @@ function renderNotice(message, variant) {
   notice.className = variant ? `notice ${variant}` : "notice";
   notice.textContent = message;
   region.appendChild(notice);
-}
-
-// Drive the client-side staged progress timeline. setTimeout per stage so each
-// threshold writes its message into the aria-live region.
-function startStages() {
-  clearStages();
-  const timers = STAGES.map((stage) =>
-    window.setTimeout(() => renderNotice(stage.text, "progress"), stage.at),
-  );
-  stageTimer = timers;
-}
-
-function clearStages() {
-  if (stageTimer) {
-    stageTimer.forEach((id) => window.clearTimeout(id));
-    stageTimer = null;
-  }
 }
 
 function makeBadge(labelText, valueText, className) {
@@ -228,42 +209,6 @@ function renderComparison(region, body) {
   region.appendChild(card);
 }
 
-// Translate an HTTP response (or network failure) into a rendered state. The UI is
-// never left stuck on "loading": every branch writes into the aria-live region.
-async function handleResponse(response) {
-  // 2xx -> parse and render one of the five AgentResult kinds.
-  if (response.ok) {
-    const body = await safeJson(response);
-    if (body === undefined) {
-      renderNotice("The service returned a response that could not be read.", "error");
-      return;
-    }
-    renderResult(body);
-    return;
-  }
-
-  if (response.status === 400) {
-    // ValidationErrorResponse: {error: 'invalid_request', detail: [...]}.
-    const body = await safeJson(response);
-    const message = extractValidationMessage(body);
-    renderNotice(message, "error");
-    return;
-  }
-
-  if (response.status === 429) {
-    renderNotice("The service is rate limited right now. Please wait a moment and try again.", "error");
-    return;
-  }
-
-  if (response.status >= 500) {
-    // Includes 503: typically a cold start still warming up.
-    renderNotice("The service is still warming up. Please try your query again.", "error");
-    return;
-  }
-
-  renderNotice(`The service returned an unexpected status (${response.status}).`, "error");
-}
-
 // Pull a readable message out of a 400 ValidationErrorResponse detail list; fall
 // back to a generic message if the shape is unexpected.
 function extractValidationMessage(body) {
@@ -306,6 +251,125 @@ function warmUp() {
     });
 }
 
+// Clear the poll timer (if any) and re-enable the submit button. Called exactly
+// once on every terminal/cap/error path and after a submit failure, so the UI is
+// never stuck disabled or left polling after the flow ends.
+function stopPolling() {
+  if (pollHandle !== null) {
+    window.clearTimeout(pollHandle);
+    pollHandle = null;
+  }
+  const button = document.getElementById("submit-button");
+  if (button) {
+    button.disabled = false;
+  }
+}
+
+// Poll GET /jobs/{id} until the job reaches a terminal status, rendering real
+// per-phase progress into the aria-live region as it advances. Driven by a
+// recursive setTimeout (not setInterval) so backoff is clean and requests never
+// overlap. `attempt` counts transient-error retries toward MAX_POLL_ATTEMPTS;
+// `backoff` is the current extra delay added after a transient error.
+//
+// Branch on HTTP status FIRST, then on body.status for a 200. The ONLY retried
+// outcomes are a >= 500 response and a rejected fetch (network/CORS); 404, any
+// other non-ok status, succeeded, failed, and an unknown body.status are all
+// terminal and stop polling immediately.
+async function pollJob(jobId, attempt, backoff) {
+  const attemptNo = attempt || 0;
+  const backoffMs = backoff || 0;
+
+  let response;
+  try {
+    response = await fetch(API_BASE + "/jobs/" + encodeURIComponent(jobId), {
+      method: "GET",
+    });
+  } catch (err) {
+    // Rejected fetch (network error, CORS, DNS): transient, retry with backoff.
+    console.error("Poll failed (network/CORS), will retry:", err);
+    scheduleRetry(jobId, attemptNo, backoffMs);
+    return;
+  }
+
+  if (response.status === 404) {
+    // Unknown or expired job id. Terminal, not retried.
+    renderNotice("That request has expired or was not found.", "error");
+    stopPolling();
+    return;
+  }
+
+  if (response.status >= 500) {
+    // Server-side blip: transient, retry with backoff.
+    scheduleRetry(jobId, attemptNo, backoffMs);
+    return;
+  }
+
+  if (!response.ok) {
+    // Any other non-2xx (e.g. 400/403): terminal, not retried.
+    renderNotice(
+      `The service returned an unexpected status (${response.status}).`,
+      "error",
+    );
+    stopPolling();
+    return;
+  }
+
+  // 200: read the job body and dispatch on body.status.
+  const body = await safeJson(response);
+  const bodyStatus = body && body.status;
+
+  switch (bodyStatus) {
+    case "queued":
+    case "running": {
+      // Real per-phase progress; keep polling.
+      const progress = (body && body.progress) || {};
+      const label = progress.label || "Working on your request...";
+      const turnSuffix = progress.turn ? ` (turn ${progress.turn})` : "";
+      renderNotice(label + turnSuffix, "progress");
+      // A successful poll resets backoff and does NOT count against the cap.
+      pollHandle = window.setTimeout(() => pollJob(jobId, 0, 0), POLL_INTERVAL_MS);
+      return;
+    }
+    case "succeeded":
+      // Terminal: render the 5-kind AgentResult via the unchanged renderer.
+      renderResult(body.result);
+      stopPolling();
+      return;
+    case "failed":
+      // Terminal: infrastructure/unexpected error on the worker side.
+      renderNotice(
+        "The service could not complete your request. Please try again.",
+        "error",
+      );
+      stopPolling();
+      return;
+    default:
+      // Missing or unknown body.status: treat as a generic unexpected response.
+      renderNotice("Unexpected response from the service.", "error");
+      stopPolling();
+      return;
+  }
+}
+
+// Schedule the next poll after a transient failure (>= 500 or a rejected fetch),
+// applying linear backoff and giving up at the attempt cap.
+function scheduleRetry(jobId, attemptNo, backoffMs) {
+  const nextAttempt = attemptNo + 1;
+  if (nextAttempt >= MAX_POLL_ATTEMPTS) {
+    renderNotice(
+      "The service is taking longer than expected. Please try again.",
+      "error",
+    );
+    stopPolling();
+    return;
+  }
+  const nextBackoff = Math.min(backoffMs + BACKOFF_STEP_MS, MAX_BACKOFF_MS);
+  pollHandle = window.setTimeout(
+    () => pollJob(jobId, nextAttempt, nextBackoff),
+    POLL_INTERVAL_MS + nextBackoff,
+  );
+}
+
 async function onSubmit(event) {
   event.preventDefault();
 
@@ -319,26 +383,64 @@ async function onSubmit(event) {
   }
 
   button.disabled = true;
-  startStages();
+  renderNotice("Submitting your question...", "progress");
 
+  let response;
   try {
     // Send ONLY {query}. QueryRequest is extra='forbid', so sending max_turns (or
     // anything else) would trip a 400. Any future max_turns control MUST source its
     // bound from serving.schemas.MAX_TURNS_CAP, not a magic literal.
-    const response = await fetch(API_BASE + "/query", {
+    response = await fetch(API_BASE + "/jobs", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ query: text }),
     });
-    await handleResponse(response);
   } catch (err) {
     // fetch rejects with a TypeError on network failure or a CORS block.
-    console.error("Request failed (network/CORS):", err);
+    console.error("Submit failed (network/CORS):", err);
     renderNotice("Could not reach the service. Check your connection and try again.", "error");
-  } finally {
-    clearStages();
-    button.disabled = false;
+    stopPolling();
+    return;
   }
+
+  // Dispatch on the submit response status FIRST. Do NOT route this through a
+  // generic ok/error handler: a 202 is response.ok === true, and the submit body
+  // ({job_id, status, poll_url}) is NOT a renderable AgentResult. Only the terminal
+  // poll body is rendered via renderResult.
+  if (response.status === 202) {
+    const body = await safeJson(response);
+    const jobId = body && body.job_id;
+    if (!jobId) {
+      renderNotice("Unexpected response from the service.", "error");
+      stopPolling();
+      return;
+    }
+    renderNotice("Submitting your question...", "progress");
+    pollJob(jobId, 0, 0);
+    return;
+  }
+
+  if (response.status === 400) {
+    // ValidationErrorResponse: {error: 'invalid_request', detail: [...]}.
+    renderNotice(extractValidationMessage(await safeJson(response)), "error");
+    stopPolling();
+    return;
+  }
+
+  if (response.status === 429) {
+    renderNotice("The service is rate limited right now. Please wait a moment and try again.", "error");
+    stopPolling();
+    return;
+  }
+
+  if (response.status >= 500) {
+    renderNotice("The service is still warming up. Please try your query again.", "error");
+    stopPolling();
+    return;
+  }
+
+  renderNotice(`The service returned an unexpected status (${response.status}).`, "error");
+  stopPolling();
 }
 
 function init() {

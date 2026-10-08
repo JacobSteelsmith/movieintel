@@ -2,18 +2,27 @@
 
 ``docs/openapi.yaml`` is a PUBLISHED artifact built from the single source of truth - the
 Pydantic models - via ``model_json_schema()``. :func:`build_openapi` assembles an OpenAPI
-3.1 document documenting POST ``/query`` with:
+3.1 document documenting:
 
-- a request body referencing :class:`~movieintel.serving.schemas.QueryRequest`;
-- a 200 response that is the ``AgentResult`` union (``oneOf`` over the five result models,
-  discriminated by ``kind``);
-- a 400 response referencing :class:`~movieintel.serving.schemas.ValidationErrorResponse`.
+- POST ``/query`` - the synchronous endpoint: a request body referencing
+  :class:`~movieintel.serving.schemas.QueryRequest`, a 200 response that is the
+  ``AgentResult`` union (``oneOf`` over the five result models, discriminated by ``kind``),
+  and a 400 response referencing
+  :class:`~movieintel.serving.schemas.ValidationErrorResponse`.
+- POST ``/jobs`` - submit an async job: the same ``QueryRequest`` body, a 202 response
+  referencing :class:`~movieintel.serving.jobs.SubmitResponse`, and a 400 response
+  referencing ``ValidationErrorResponse``.
+- GET ``/jobs/{id}`` - poll a job: a path parameter ``id``, a 200 response referencing
+  :class:`~movieintel.serving.jobs.JobStatusResponse` (which embeds the ``AgentResult``
+  ``oneOf`` via its ``result`` field), and a 404 response referencing
+  :class:`~movieintel.serving.jobs.NotFoundResponse`.
 
-All component schemas are harvested from the models' JSON Schemas (including their nested
-``$defs``) so the document is self-contained. The document is rendered as JSON-compatible
-YAML (JSON is a strict subset of YAML 1.2), so it parses with the stdlib ``json`` module and
-needs no new YAML dependency. :func:`write_openapi_yaml` writes it to :data:`OPENAPI_PATH`,
-and a sync test asserts the on-disk file matches the generator output.
+``/health`` is intentionally omitted. All component schemas are harvested from the models'
+JSON Schemas (including their nested ``$defs``) so the document is self-contained. The
+document is rendered as JSON-compatible YAML (JSON is a strict subset of YAML 1.2), so it
+parses with the stdlib ``json`` module and needs no new YAML dependency.
+:func:`write_openapi_yaml` writes it to :data:`OPENAPI_PATH`, and a sync test asserts the
+on-disk file matches the generator output.
 """
 
 from __future__ import annotations
@@ -30,6 +39,13 @@ from movieintel.agent.response import (
     PreferenceSummary,
     RecommendationList,
     RefusalResponse,
+)
+from movieintel.serving.jobs import (
+    JobProgress,
+    JobStatusResponse,
+    NotFoundResponse,
+    SubmitResponse,
+    WorkerError,
 )
 from movieintel.serving.schemas import QueryRequest, ValidationErrorResponse
 
@@ -93,6 +109,11 @@ def build_openapi() -> dict[str, Any]:
     models: tuple[type[BaseModel], ...] = (
         QueryRequest,
         ValidationErrorResponse,
+        SubmitResponse,
+        JobStatusResponse,
+        JobProgress,
+        WorkerError,
+        NotFoundResponse,
         *_AGENT_RESULT_MODELS,
     )
     schemas = _collect_schemas(models)
@@ -157,7 +178,89 @@ def build_openapi() -> dict[str, Any]:
                         },
                     },
                 }
-            }
+            },
+            "/jobs": {
+                "post": {
+                    "operationId": "submitJob",
+                    "summary": "Submit an async movie-intelligence job.",
+                    "description": (
+                        "Enqueue the agentic query for background processing and return "
+                        "immediately with a job id and poll URL; the agent runs on a worker "
+                        "and the result is retrieved via GET /jobs/{id}."
+                    ),
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": f"{_COMPONENTS_PREFIX}QueryRequest"}
+                            }
+                        },
+                    },
+                    "responses": {
+                        "202": {
+                            "description": (
+                                "The job was accepted and queued; poll the returned poll_url "
+                                "for progress and the final result."
+                            ),
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": f"{_COMPONENTS_PREFIX}SubmitResponse"}
+                                }
+                            },
+                        },
+                        "400": {
+                            "description": (
+                                "The request body was malformed or violated the schema; no "
+                                "job was created."
+                            ),
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": f"{_COMPONENTS_PREFIX}ValidationErrorResponse"
+                                    }
+                                }
+                            },
+                        },
+                    },
+                }
+            },
+            "/jobs/{id}": {
+                "get": {
+                    "operationId": "getJob",
+                    "summary": "Poll the status and result of an async job.",
+                    "parameters": [
+                        {
+                            "name": "id",
+                            "in": "path",
+                            "required": True,
+                            "description": "The job id returned by POST /jobs.",
+                            "schema": {"type": "string"},
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": (
+                                "The current job status with real per-phase progress; once "
+                                "terminal, a succeeded job carries the AgentResult under "
+                                "'result' and a failed job carries the error under 'error'."
+                            ),
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": f"{_COMPONENTS_PREFIX}JobStatusResponse"}
+                                }
+                            },
+                        },
+                        "404": {
+                            "description": "No job exists with that id (unknown or expired).",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": f"{_COMPONENTS_PREFIX}NotFoundResponse"}
+                                }
+                            },
+                        },
+                    },
+                }
+            },
         },
         "components": {"schemas": schemas},
     }

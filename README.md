@@ -263,14 +263,35 @@ export API_URL="https://izizrxgasb.execute-api.us-east-1.amazonaws.com"
 ./docs/examples/curl.sh
 ```
 
-The base URL has **no stage path** (`/prod` is not used); `curl.sh` appends `/query`. The
-Lambda scales to zero, so the **first call can cold-start and time out (503)**; warm calls
-return a structured 200 in roughly 22-23s. (A `postman_collection.json` is in
+The base URL has **no stage path** (`/prod` is not used). The API exposes two serving paths
+on the same gateway, and `curl.sh` exercises both. (A `postman_collection.json` is in
 [`docs/examples/`](docs/examples/) and the contract is in
 [`docs/openapi.yaml`](docs/openapi.yaml).)
 
+**Recommended path - async submit-then-poll (`POST /jobs` -> poll `GET /jobs/{id}`).** This
+is the **503-free** path. `POST /jobs` validates the same `QueryRequest` body and returns a
+fast `202 {job_id, status, poll_url}` well under the 30s gateway integration timeout; a
+worker Lambda then runs the agent loop to completion in the background and writes real
+per-phase progress and the terminal result into DynamoDB. The client polls
+`GET /jobs/{id}` (a fast single read) until `status` is `succeeded` (carrying the 5-kind
+`AgentResult`) or `failed`. Because the long-running loop is decoupled from the request
+window, this path never hits the 30s wall:
+
+```bash
+job_id=$(curl -sS -X POST "$API_URL/jobs" -H 'content-type: application/json' \
+  --data '{"query": "Recommend action movies with high revenue and positive sentiment."}' \
+  | python3 -c 'import sys, json; print(json.load(sys.stdin)["job_id"])')
+curl -sS "$API_URL/jobs/$job_id"   # repeat until status is succeeded or failed
+```
+
+**Synchronous path - `POST /query` (legacy fallback).** The original single request/response
+route is still available and returns the serialized `AgentResult` at `200`. The Lambda scales
+to zero, so the first call can cold-start, and a heavy query can still exceed the 30s gateway
+timeout and return `503` (see section 8); warm calls return a structured 200 in roughly
+22-23s.
+
 The API carries a browser CORS preflight config, but direct non-browser clients (curl,
-Postman) are unaffected by CORS and query `POST /query` exactly as shown above.
+Postman) are unaffected by CORS and query both paths exactly as shown above.
 
 #### Warm-up endpoint
 
@@ -293,14 +314,13 @@ A static web client is hosted on CloudFront in front of a private S3 bucket (the
 https://d2scp65e5pkne3.cloudfront.net
 ```
 
-On load it pings `GET /health` to warm the backend, then posts queries to `POST /query`
-and renders the structured `AgentResult`, showing staged progress while the request is in
-flight. The API base URL it calls is set in [`frontend/config.js`](frontend/config.js)
-from the `MovieIntelServingStack` `ServingApiUrl` output.
-
-> Known limitation: the agent loop can still exceed the API Gateway HTTP API 30s
-> integration timeout on heavy queries and return `503`, independent of cold start. See
-> section 8.
+On load it pings `GET /health` to warm the backend, then uses the async submit-then-poll
+path: it submits each query to `POST /jobs` and polls `GET /jobs/{id}`, rendering the real
+per-phase progress reported by the worker and then the structured `AgentResult` on the
+terminal response. Because it uses the async path, the front end is not subject to the 30s
+gateway wall. The API base URL it calls is set in
+[`frontend/config.js`](frontend/config.js) from the `MovieIntelServingStack` `ServingApiUrl`
+output.
 
 ### Destroy
 
@@ -390,23 +410,24 @@ result from a warm smoke check (truncated to the top two movies):
 
 ## 8. Known limitations and future work
 
-- **30s integration-timeout 503 on synchronous POST /query.** The API Gateway HTTP API
+- **30s integration-timeout 503 removed by the async path.** The API Gateway HTTP API
   integration timeout is hard-capped at 30s. The multi-turn agent loop runs one sequential
   Bedrock Converse round trip (plus tool calls) per turn, so wall-clock latency grows with
-  the executed turn count. Two things can push a request past 30s: a cold start (absorbed by
-  warming `GET /health` or a throwaway `POST /query` first), AND the loop's own run time on
-  heavier queries even when warm. When the request exceeds 30s the gateway returns an
+  the executed turn count, and on heavier queries the loop's own run time (independent of
+  cold start) could exceed 30s. When a synchronous request exceeds 30s the gateway returns an
   unstructured `503 {"message":"Service Unavailable"}` while the Lambda (300s timeout) keeps
   running and completes in the background, which is why a retry often succeeds. CloudWatch
-  confirms this: successful invocations of 30.6s and 31.7s with `IntegrationLatency` maxing
-  at exactly 30000ms and matching `5xx` counts. Options: warm before the demo [chosen for
-  cold start]; reduce loop latency / clamp `max_turns` server-side [implemented on the
-  `fix/serving-max-turns-clamp` branch, held pending the async work]; a faster model (Haiku)
-  for the loop; provisioned concurrency [breaks scale-to-zero]; async 202 + poll/callback or
-  response streaming via a Lambda Function URL [correct at scale, not bound by the 30s cap,
-  changes the contract]; raising the gateway timeout [not viable, hard-capped].
-  **Recommendation:** warm for the demo; move to async/streaming serving for production so
-  variable loop latency is no longer bounded by the 30s gateway wall.
+  confirmed this: successful invocations of 30.6s and 31.7s with `IntegrationLatency` maxing
+  at exactly 30000ms and matching `5xx` counts. The **async submit-then-poll path (`POST
+  /jobs` -> poll `GET /jobs/{id}`) removes this 503** by decoupling the agent loop from the
+  request window: `POST /jobs` returns `202` well under 30s, a worker Lambda runs the loop to
+  completion in the background, and the client polls a fast single read for progress and the
+  terminal result. The front end and `curl.sh`/`postman_collection.json` use this path. The
+  synchronous `POST /query` route remains available as a legacy fallback and can still hit the
+  30s wall on heavy queries. Other mitigations considered for the synchronous path: warm
+  before the demo [absorbs cold start only]; clamp `max_turns` server-side [parked on the
+  `fix/serving-max-turns-clamp` branch]; a faster model (Haiku); provisioned concurrency
+  [breaks scale-to-zero]; raising the gateway timeout [not viable, hard-capped].
 - **Enrichment skip rate and the Guardrail-config journey.** The latest clean-slate run of
   the 100-movie high-revenue sample passes 97/100 (`schema_validation` 0.97), with ~3 items
   tolerated by the per-item Catch. Getting there surfaced two real Guardrail misconfigurations

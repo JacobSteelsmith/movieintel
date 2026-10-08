@@ -62,6 +62,84 @@
           }
         }
       }
+    },
+    "/jobs": {
+      "post": {
+        "operationId": "submitJob",
+        "summary": "Submit an async movie-intelligence job.",
+        "description": "Enqueue the agentic query for background processing and return immediately with a job id and poll URL; the agent runs on a worker and the result is retrieved via GET /jobs/{id}.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The job was accepted and queued; poll the returned poll_url for progress and the final result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmitResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request body was malformed or violated the schema; no job was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/{id}": {
+      "get": {
+        "operationId": "getJob",
+        "summary": "Poll the status and result of an async job.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The job id returned by POST /jobs.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The current job status with real per-phase progress; once terminal, a succeeded job carries the AgentResult under 'result' and a failed job carries the error under 'error'.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatusResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No job exists with that id (unknown or expired).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -121,128 +199,75 @@
         "title": "ValidationErrorResponse",
         "type": "object"
       },
-      "Mood": {
-        "description": "Fixed mood/tone label set; the model must choose one best-fit member (\u00a77.1).\n\nExactly these six members \u2014 out-of-set values are rejected.",
-        "enum": [
-          "dark",
-          "light",
-          "intense",
-          "uplifting",
-          "tense",
-          "lighthearted"
-        ],
-        "title": "Mood",
-        "type": "string"
-      },
-      "RecommendedMovie": {
+      "SubmitResponse": {
         "additionalProperties": false,
-        "description": "One movie in a :class:`RecommendationList` (the model's chosen rationale + facts).",
+        "description": "The POST ``/jobs`` 202 body: a job id, ``queued`` status, and a poll URL.",
         "properties": {
-          "movie_id": {
-            "title": "Movie Id",
+          "job_id": {
+            "title": "Job Id",
             "type": "string"
           },
-          "title": {
-            "title": "Title",
+          "status": {
+            "const": "queued",
+            "default": "queued",
+            "title": "Status",
             "type": "string"
           },
-          "sentiment": {
-            "$ref": "#/components/schemas/Sentiment"
-          },
-          "pes": {
-            "title": "Pes",
-            "type": "number"
-          },
-          "mood": {
-            "$ref": "#/components/schemas/Mood"
-          },
-          "rationale": {
-            "title": "Rationale",
+          "poll_url": {
+            "title": "Poll Url",
             "type": "string"
           }
         },
         "required": [
-          "movie_id",
-          "title",
-          "sentiment",
-          "pes",
-          "mood",
-          "rationale"
+          "job_id",
+          "poll_url"
         ],
-        "title": "RecommendedMovie",
+        "title": "SubmitResponse",
         "type": "object"
       },
-      "Sentiment": {
-        "description": "Overview sentiment label (LLM-assigned in Task 3).",
-        "enum": [
-          "positive",
-          "negative",
-          "neutral"
-        ],
-        "title": "Sentiment",
-        "type": "string"
+      "AgentResult": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/RecommendationList"
+          },
+          {
+            "$ref": "#/components/schemas/PreferenceSummary"
+          },
+          {
+            "$ref": "#/components/schemas/ComparativeAnalysis"
+          },
+          {
+            "$ref": "#/components/schemas/BoundedResponse"
+          },
+          {
+            "$ref": "#/components/schemas/RefusalResponse"
+          }
+        ]
       },
-      "RecommendationList": {
+      "BoundedResponse": {
         "additionalProperties": false,
-        "description": "Recommendation result \u2014 e.g. \"Recommend action movies ...\" (REQ-B-3.3).",
+        "description": "The MAX_TURNS outcome: the loop stopped at its bound without a final answer (REQ-B-3.2).",
         "properties": {
           "kind": {
-            "const": "recommendations",
-            "default": "recommendations",
+            "const": "bounded",
+            "default": "bounded",
             "title": "Kind",
             "type": "string"
           },
-          "query_summary": {
-            "title": "Query Summary",
+          "reason": {
+            "title": "Reason",
             "type": "string"
           },
-          "movies": {
-            "items": {
-              "$ref": "#/components/schemas/RecommendedMovie"
-            },
-            "title": "Movies",
-            "type": "array"
+          "turns_used": {
+            "title": "Turns Used",
+            "type": "integer"
           }
         },
         "required": [
-          "query_summary",
-          "movies"
+          "reason",
+          "turns_used"
         ],
-        "title": "RecommendationList",
-        "type": "object"
-      },
-      "PreferenceSummary": {
-        "additionalProperties": false,
-        "description": "Preference-summary result \u2014 e.g. \"Summarize preferences for a user ...\" (REQ-B-3.3).",
-        "properties": {
-          "kind": {
-            "const": "preferences",
-            "default": "preferences",
-            "title": "Kind",
-            "type": "string"
-          },
-          "subject": {
-            "title": "Subject",
-            "type": "string"
-          },
-          "summary": {
-            "title": "Summary",
-            "type": "string"
-          },
-          "highlights": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Highlights",
-            "type": "array"
-          }
-        },
-        "required": [
-          "subject",
-          "summary",
-          "highlights"
-        ],
-        "title": "PreferenceSummary",
+        "title": "BoundedResponse",
         "type": "object"
       },
       "ComparativeAnalysis": {
@@ -282,30 +307,166 @@
         "title": "ComparativeAnalysis",
         "type": "object"
       },
-      "BoundedResponse": {
+      "JobProgress": {
         "additionalProperties": false,
-        "description": "The MAX_TURNS outcome: the loop stopped at its bound without a final answer (REQ-B-3.2).",
+        "description": "Real per-phase progress of the agent loop for a job (design FR-3).",
         "properties": {
-          "kind": {
-            "const": "bounded",
-            "default": "bounded",
-            "title": "Kind",
-            "type": "string"
+          "phase": {
+            "$ref": "#/components/schemas/ProgressPhase"
           },
-          "reason": {
-            "title": "Reason",
-            "type": "string"
-          },
-          "turns_used": {
-            "title": "Turns Used",
+          "turn": {
+            "title": "Turn",
             "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
           }
         },
         "required": [
-          "reason",
-          "turns_used"
+          "phase",
+          "turn",
+          "label"
         ],
-        "title": "BoundedResponse",
+        "title": "JobProgress",
+        "type": "object"
+      },
+      "JobStatus": {
+        "description": "The lifecycle state of an async job (design Decision 1).",
+        "enum": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed"
+        ],
+        "title": "JobStatus",
+        "type": "string"
+      },
+      "Mood": {
+        "description": "Fixed mood/tone label set; the model must choose one best-fit member (\u00a77.1).\n\nExactly these six members \u2014 out-of-set values are rejected.",
+        "enum": [
+          "dark",
+          "light",
+          "intense",
+          "uplifting",
+          "tense",
+          "lighthearted"
+        ],
+        "title": "Mood",
+        "type": "string"
+      },
+      "PreferenceSummary": {
+        "additionalProperties": false,
+        "description": "Preference-summary result \u2014 e.g. \"Summarize preferences for a user ...\" (REQ-B-3.3).",
+        "properties": {
+          "kind": {
+            "const": "preferences",
+            "default": "preferences",
+            "title": "Kind",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "highlights": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Highlights",
+            "type": "array"
+          }
+        },
+        "required": [
+          "subject",
+          "summary",
+          "highlights"
+        ],
+        "title": "PreferenceSummary",
+        "type": "object"
+      },
+      "ProgressPhase": {
+        "description": "The real agent-loop phase a :class:`ProgressEvent` reports.",
+        "enum": [
+          "understanding",
+          "searching",
+          "comparing",
+          "composing",
+          "refused",
+          "bounded"
+        ],
+        "title": "ProgressPhase",
+        "type": "string"
+      },
+      "RecommendationList": {
+        "additionalProperties": false,
+        "description": "Recommendation result \u2014 e.g. \"Recommend action movies ...\" (REQ-B-3.3).",
+        "properties": {
+          "kind": {
+            "const": "recommendations",
+            "default": "recommendations",
+            "title": "Kind",
+            "type": "string"
+          },
+          "query_summary": {
+            "title": "Query Summary",
+            "type": "string"
+          },
+          "movies": {
+            "items": {
+              "$ref": "#/components/schemas/RecommendedMovie"
+            },
+            "title": "Movies",
+            "type": "array"
+          }
+        },
+        "required": [
+          "query_summary",
+          "movies"
+        ],
+        "title": "RecommendationList",
+        "type": "object"
+      },
+      "RecommendedMovie": {
+        "additionalProperties": false,
+        "description": "One movie in a :class:`RecommendationList` (the model's chosen rationale + facts).",
+        "properties": {
+          "movie_id": {
+            "title": "Movie Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "sentiment": {
+            "$ref": "#/components/schemas/Sentiment"
+          },
+          "pes": {
+            "title": "Pes",
+            "type": "number"
+          },
+          "mood": {
+            "$ref": "#/components/schemas/Mood"
+          },
+          "rationale": {
+            "title": "Rationale",
+            "type": "string"
+          }
+        },
+        "required": [
+          "movie_id",
+          "title",
+          "sentiment",
+          "pes",
+          "mood",
+          "rationale"
+        ],
+        "title": "RecommendedMovie",
         "type": "object"
       },
       "RefusalResponse": {
@@ -327,6 +488,113 @@
           "reason"
         ],
         "title": "RefusalResponse",
+        "type": "object"
+      },
+      "Sentiment": {
+        "description": "Overview sentiment label (LLM-assigned in Task 3).",
+        "enum": [
+          "positive",
+          "negative",
+          "neutral"
+        ],
+        "title": "Sentiment",
+        "type": "string"
+      },
+      "WorkerError": {
+        "additionalProperties": false,
+        "description": "Structured terminal error for a ``failed`` job (worker crash, not a modeled outcome).",
+        "properties": {
+          "error": {
+            "const": "worker_failed",
+            "default": "worker_failed",
+            "title": "Error",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "WorkerError",
+        "type": "object"
+      },
+      "JobStatusResponse": {
+        "additionalProperties": false,
+        "description": "The GET ``/jobs/{id}`` 200 body (design Decision 1).\n\n``progress`` is REQUIRED (every write path preserves a complete progress map). ``result``\nis the serialized five-kind ``AgentResult`` on success; ``error`` is a nested\n:class:`WorkerError` on failure. Both are ``None`` while in-flight and are omitted on the\nwire via ``exclude_none=True`` at the serialize site.",
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "progress": {
+            "$ref": "#/components/schemas/JobProgress"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkerError"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "job_id",
+          "status",
+          "progress",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "JobStatusResponse",
+        "type": "object"
+      },
+      "NotFoundResponse": {
+        "additionalProperties": false,
+        "description": "The 404 body for an unknown/expired job id on the poll route.",
+        "properties": {
+          "error": {
+            "const": "not_found",
+            "default": "not_found",
+            "title": "Error",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "NotFoundResponse",
         "type": "object"
       }
     }

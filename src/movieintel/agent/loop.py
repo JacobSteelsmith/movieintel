@@ -28,11 +28,13 @@ and Guardrail come only from :class:`BedrockConfig` (no inline literals).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
 from pydantic import BaseModel
 
+from movieintel.agent.progress import PHASE_LABELS, ProgressEvent, ProgressPhase
 from movieintel.agent.response import (
     FINAL_ANSWER_SPEC,
     AgentResult,
@@ -57,6 +59,8 @@ from movieintel.enrichment.client import BedrockConverseClient
 from movieintel.kb.config import KBConfig
 
 __all__ = ["MAX_TURNS", "ToolDispatcher", "is_guardrail_intervention", "run_agent"]
+
+logger = logging.getLogger(__name__)
 
 # Default safety bound on orchestration turns (REQ-B-3.2); overridable per call via
 # ``run_agent(..., max_turns=...)`` and as this module constant (mirrors
@@ -226,6 +230,25 @@ def _is_error_result(result: BaseModel) -> bool:
     return hasattr(result, "error")
 
 
+def _emit(
+    on_progress: Callable[[ProgressEvent], None] | None,
+    *,
+    phase: ProgressPhase,
+    turn: int,
+) -> None:
+    """Dispatch a progress event, a no-op when ``on_progress`` is ``None`` (design Decision 4).
+
+    Progress reporting is advisory: a callback that raises must never fail a real agent run,
+    so any callback exception is swallowed and logged at ``warning`` level.
+    """
+    if on_progress is None:
+        return
+    try:
+        on_progress(ProgressEvent(phase=phase, turn=turn, label=PHASE_LABELS[phase]))
+    except Exception:  # noqa: BLE001 - progress is advisory, never fail the run
+        logger.warning("on_progress callback raised for phase %s", phase, exc_info=True)
+
+
 def run_agent(
     user_request: str,
     *,
@@ -235,6 +258,7 @@ def run_agent(
     kb_config: KBConfig,
     config: BedrockConfig,
     max_turns: int = MAX_TURNS,
+    on_progress: Callable[[ProgressEvent], None] | None = None,
 ) -> AgentResult:
     """Run the explicit Converse orchestration loop for ``user_request`` (design §3.7).
 
@@ -243,12 +267,19 @@ def run_agent(
     intervention, or a :class:`BoundedResponse` on the ``max_turns`` bound. A per-request
     problem (unknown tool, invalid args, bound, guardrail) is always a structured outcome,
     never a raise.
+
+    When ``on_progress`` is supplied it receives a typed :class:`ProgressEvent` at each
+    verified loop point (loop start, guardrail refusal, per tool dispatch, final answer,
+    and the max_turns bound). When it is ``None`` (the default) no event is constructed and
+    control flow and the return value are byte-for-byte identical to omitting it; a callback
+    that raises is swallowed and never fails the run (design Decision 4).
     """
     system_prompt = build_agent_system_prompt()
     tool_config = _tool_config()
     dispatcher = ToolDispatcher(repository, kb_client, kb_config)
     messages: list[dict[str, Any]] = [{"role": "user", "content": [{"text": user_request}]}]
 
+    _emit(on_progress, phase=ProgressPhase.understanding, turn=0)
     for turn in range(max_turns):
         response = client.converse(
             **_request(
@@ -261,10 +292,12 @@ def run_agent(
 
         # Guardrail interventions are checked FIRST — never dispatch or parse blocked content.
         if is_guardrail_intervention(response):
+            _emit(on_progress, phase=ProgressPhase.refused, turn=turn + 1)
             return safe_refusal()
 
         if response.get("stopReason") != "tool_use":
             # Model stopped without calling final_answer; do not fabricate a result.
+            _emit(on_progress, phase=ProgressPhase.bounded, turn=turn + 1)
             return bounded_response(turns_used=turn + 1)
 
         messages.append(_assistant_turn(response))
@@ -277,11 +310,19 @@ def run_agent(
             if name == _FINAL_ANSWER_TOOL:
                 parsed = parse_final_answer(tool_input)
                 if not isinstance(parsed, FinalAnswerError):
+                    _emit(on_progress, phase=ProgressPhase.composing, turn=turn + 1)
                     return parsed
                 # Invalid final answer: surface the error so the model can correct, then
-                # keep looping (never return an unvalidated object — REQ-X-1).
+                # keep looping (never return an unvalidated object — REQ-X-1). Emit NOTHING
+                # here: the loop keeps running, so leaving a stale ``composing`` would lie.
                 tool_results.append(_tool_result_block(tool_use_id, parsed, is_error=True))
                 continue
+
+            if name in {"query_movies", "semantic_search"}:
+                _emit(on_progress, phase=ProgressPhase.searching, turn=turn + 1)
+            elif name == "compare_movies":
+                _emit(on_progress, phase=ProgressPhase.comparing, turn=turn + 1)
+            # Unknown tools emit NOTHING: no user-facing phase maps to a hallucinated tool.
 
             result = dispatcher.dispatch(name, tool_input)
             tool_results.append(
@@ -290,4 +331,5 @@ def run_agent(
 
         messages.append({"role": "user", "content": tool_results})
 
+    _emit(on_progress, phase=ProgressPhase.bounded, turn=max_turns)
     return bounded_response(turns_used=max_turns)

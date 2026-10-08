@@ -3,9 +3,16 @@
 These synthesize ``MovieIntelServingStack`` into a CloudFormation template with
 ``aws_cdk.assertions.Template`` and assert the contract the stack must satisfy:
 
-* exactly one python3.12 serving Lambda whose Handler is ``handlers.serve.handler.handler``;
-* an API Gateway integrated with that Lambda (HTTP API ``AWS::ApiGatewayV2::*`` or a REST
-  ``AWS::ApiGateway::RestApi`` proxy fallback - the assertion tolerates either flavor);
+* three python3.12 Lambdas - the synchronous serve handler plus the async submit and worker
+  handlers (FEAT-003); the worker is 300s/1024MB, the submit is 10s/256MB, and neither async
+  function attaches a ``_sqlite`` layer (both attach the shared layer);
+* an API Gateway integrated with the serve Lambda (HTTP API ``AWS::ApiGatewayV2::*`` or a REST
+  ``AWS::ApiGateway::RestApi`` proxy fallback - the assertion tolerates either flavor), now
+  carrying FOUR routes (POST /query, GET /health, POST /jobs, GET /jobs/{id});
+* per-role least-privilege IAM: the SubmitFn role writes/reads the job item on the table ARN
+  only (no GSI1, no Query/Scan/BatchGetItem, no Bedrock) and invokes the worker; the WorkerFn
+  role mirrors the serving Bedrock/KB/DynamoDB read surface plus the job-write actions, with no
+  ``bedrock:*`` and no Resource ``*``;
 * the serving Lambda env pins BEDROCK_MODEL_ID / MOVIEINTEL_KB_ID / MOVIEINTEL_TABLE_NAME /
   MOVIEINTEL_GSI1_NAME to the deployed-resource literals, and BEDROCK_GUARDRAIL_ID to an
   in-stack token (the serving stack now defines its own guardrail);
@@ -22,6 +29,7 @@ These synthesize ``MovieIntelServingStack`` into a CloudFormation template with
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import aws_cdk as cdk
 import pytest
@@ -49,11 +57,21 @@ def _serving_functions(template: Template) -> list[dict[str, object]]:
     ]
 
 
-def test_single_serving_lambda_with_handler_string(template: Template) -> None:
-    """Exactly one python3.12 serving Lambda whose Handler is handlers.serve.handler.handler."""
+def test_three_lambdas_with_expected_handler_strings(template: Template) -> None:
+    """Three python3.12 Lambdas: the sync serve + the async submit and worker handlers.
+
+    The async submit-then-poll path (FEAT-003) adds SubmitFn and WorkerFn alongside the
+    existing ServingFn, so the stack now carries exactly three python3.12 functions whose
+    Handler strings are the serve, submit, and worker handlers.
+    """
     props = _serving_functions(template)
-    assert len(props) == 1, f"expected exactly one python3.12 Lambda, found {len(props)}"
-    assert props[0]["Handler"] == "handlers.serve.handler.handler", props[0]["Handler"]
+    assert len(props) == 3, f"expected exactly three python3.12 Lambdas, found {len(props)}"
+    handlers = {p["Handler"] for p in props}
+    assert handlers == {
+        "handlers.serve.handler.handler",
+        "handlers.submit.handler.handler",
+        "handlers.worker.handler.handler",
+    }, handlers
 
 
 def test_api_gateway_integrated_with_the_lambda(template: Template) -> None:
@@ -75,10 +93,15 @@ def test_api_gateway_integrated_with_the_lambda(template: Template) -> None:
             res["Properties"].get("IntegrationType") for res in integrations.values()
         }
         assert "AWS_PROXY" in integration_types, integration_types
-        template.resource_count_is("AWS::ApiGatewayV2::Route", 2)
+        template.resource_count_is("AWS::ApiGatewayV2::Route", 4)
         routes = template.find_resources("AWS::ApiGatewayV2::Route")
         route_keys = {res["Properties"].get("RouteKey") for res in routes.values()}
-        assert route_keys == {"POST /query", "GET /health"}, route_keys
+        assert route_keys == {
+            "POST /query",
+            "GET /health",
+            "POST /jobs",
+            "GET /jobs/{id}",
+        }, route_keys
     else:
         methods = template.find_resources("AWS::ApiGateway::Method")
         rest_integration_types: set[object] = set()
@@ -160,7 +183,11 @@ def test_serving_lambda_env_pins_deployed_resource_ids(template: Template) -> No
     synth-time token (Ref/GetAtt dict) rather than the old pinned ``fvb8n9pc8e2q``. The
     remaining ids (model, KB, table, GSI) are still pinned literals.
     """
-    (props,) = _serving_functions(template)
+    serve = [
+        p for p in _serving_functions(template) if p["Handler"] == "handlers.serve.handler.handler"
+    ]
+    assert len(serve) == 1, serve
+    props = serve[0]
     environment = props.get("Environment")
     assert isinstance(environment, dict), props
     env = environment.get("Variables")
@@ -261,13 +288,18 @@ def test_apply_guardrail_references_the_in_stack_guardrail(template: Template) -
                 actions = [actions]
             if "bedrock:ApplyGuardrail" in actions:
                 apply_statements.append(stmt)
-    assert len(apply_statements) == 1, apply_statements
-    (stmt,) = apply_statements
-    resource = stmt.get("Resource")
-    assert "fvb8n9pc8e2q" not in json.dumps(stmt), "ApplyGuardrail still pins the removed literal"
-    assert resource != "*", "ApplyGuardrail grants Resource '*'"
-    # The ARN is an Fn::GetAtt token on the in-stack guardrail, so it is a dict.
-    assert isinstance(resource, dict), resource
+    # ServingFn AND WorkerFn each hold one ApplyGuardrail statement on the in-stack
+    # guardrail, so there are now two - both must resolve the ARN via a synth token and
+    # neither may pin the removed literal or a wildcard.
+    assert len(apply_statements) == 2, apply_statements
+    for stmt in apply_statements:
+        resource = stmt.get("Resource")
+        assert "fvb8n9pc8e2q" not in json.dumps(stmt), (
+            "ApplyGuardrail still pins the removed literal"
+        )
+        assert resource != "*", "ApplyGuardrail grants Resource '*'"
+        # The ARN is an Fn::GetAtt token on the in-stack guardrail, so it is a dict.
+        assert isinstance(resource, dict), resource
 
 
 def test_retrieve_references_the_deployed_knowledge_base(template: Template) -> None:
@@ -300,12 +332,14 @@ def test_dynamodb_read_on_table_and_gsi1(template: Template) -> None:
 
 
 def test_serving_dynamodb_is_read_only(template: Template) -> None:
-    """The serving DynamoDB grant is read-only (no write action) scoped to table + GSI1.
+    """The ServingFn DynamoDB grant is read-only (no write action) scoped to table + GSI1.
 
-    REQ-X-5.4: the serving layer only reads enriched movies, so its role must hold only
-    read actions (GetItem, BatchGetItem, Query, Scan) and NO write action
-    (PutItem/UpdateItem/DeleteItem/BatchWriteItem), with no wildcard dynamodb:* and no
-    Resource '*'.
+    REQ-X-5.4: the SYNCHRONOUS serving layer only reads enriched movies, so the ServingFn
+    role must hold only read actions (GetItem, BatchGetItem, Query, Scan) and NO write
+    action (PutItem/UpdateItem/DeleteItem/BatchWriteItem). The async SubmitFn/WorkerFn roles
+    legitimately hold job-write actions now, so this check is scoped to the ServingFn role,
+    identified by its bedrock:Retrieve + DynamoDB-read fingerprint (SubmitFn has no Bedrock
+    grant; WorkerFn's role carries bedrock:InvokeModel/ApplyGuardrail AND job writes).
     """
     read_actions = {"dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:Scan"}
     write_actions = {
@@ -314,21 +348,40 @@ def test_serving_dynamodb_is_read_only(template: Template) -> None:
         "dynamodb:DeleteItem",
         "dynamodb:BatchWriteItem",
     }
-    all_dynamo_actions: set[str] = set()
-    saw_dynamo = False
     policies = template.find_resources("AWS::IAM::Policy")
+    serving_doc = None
     for res in policies.values():
-        for stmt in res["Properties"]["PolicyDocument"]["Statement"]:
+        statements = res["Properties"]["PolicyDocument"]["Statement"]
+        doc_text = json.dumps(statements)
+        # The ServingFn role is the one carrying bedrock:Retrieve AND a DynamoDB read but
+        # NO Bedrock InvokeModel/ApplyGuardrail is not a reliable discriminator (ServingFn
+        # DOES hold InvokeModel); the WorkerFn role is the one that ALSO holds DynamoDB
+        # write actions. ServingFn is the Bedrock+DynamoDB role whose DynamoDB actions are
+        # all reads. Pick the role with bedrock:Retrieve whose DynamoDB actions are a
+        # read-only subset.
+        if "bedrock:Retrieve" not in doc_text:
+            continue
+        dynamo_here: set[str] = set()
+        for stmt in statements:
             actions = stmt.get("Action", [])
             if isinstance(actions, str):
                 actions = [actions]
-            dynamo = {a for a in actions if isinstance(a, str) and a.startswith("dynamodb:")}
-            if not dynamo:
-                continue
-            saw_dynamo = True
-            all_dynamo_actions |= dynamo
-            assert stmt.get("Resource") != "*", "serving DynamoDB grants Resource '*'"
-    assert saw_dynamo, "no DynamoDB grant found on the serving role"
+            dynamo_here |= {a for a in actions if isinstance(a, str) and a.startswith("dynamodb:")}
+        if dynamo_here and dynamo_here <= read_actions:
+            serving_doc = statements
+            break
+    assert serving_doc is not None, "could not locate the read-only ServingFn DynamoDB role"
+
+    all_dynamo_actions: set[str] = set()
+    for stmt in serving_doc:
+        actions = stmt.get("Action", [])
+        if isinstance(actions, str):
+            actions = [actions]
+        dynamo = {a for a in actions if isinstance(a, str) and a.startswith("dynamodb:")}
+        if not dynamo:
+            continue
+        all_dynamo_actions |= dynamo
+        assert stmt.get("Resource") != "*", "serving DynamoDB grants Resource '*'"
     assert "dynamodb:*" not in all_dynamo_actions, all_dynamo_actions
     assert all_dynamo_actions <= read_actions, (
         f"serving holds non-read actions: {all_dynamo_actions}"
@@ -383,6 +436,191 @@ def test_scale_to_zero_no_provisioned_concurrency(template: Template) -> None:
         Match.object_like({"ProvisionedConcurrencyConfig": Match.any_value()}),
         0,
     )
+
+
+def _function_by_handler(template: Template, handler: str) -> dict[str, Any]:
+    """Return the single python3.12 Lambda Properties whose Handler matches ``handler``."""
+    matches = [p for p in _serving_functions(template) if p.get("Handler") == handler]
+    assert len(matches) == 1, f"expected one {handler} Lambda, found {len(matches)}"
+    return matches[0]
+
+
+def _policy_statements(template: Template) -> list[Any]:
+    """Return each IAM policy's Statement list."""
+    return [
+        res["Properties"]["PolicyDocument"]["Statement"]
+        for res in template.find_resources("AWS::IAM::Policy").values()
+    ]
+
+
+def test_submit_and_worker_function_sizing_and_layers(template: Template) -> None:
+    """SubmitFn (10s/256MB) and WorkerFn (300s/1024MB) attach the shared layer, not _sqlite.
+
+    Both async functions ship the ``handlers`` asset with the SharedPackageLayer and NO
+    ``_sqlite`` layer (they never touch the source DBs). The worker is agent-loop sized
+    (300s timeout, 1024MB); the submit is small (10s, 256MB) because it only validates +
+    writes + async-invokes.
+    """
+    functions = template.find_resources("AWS::Lambda::Function")
+    # Only one layer (the shared package layer) exists in this stack; capture its logical id.
+    layers = template.find_resources("AWS::Lambda::LayerVersion")
+    assert len(layers) == 1, f"expected exactly one Lambda layer (shared), found {len(layers)}"
+    (shared_layer_id,) = layers.keys()
+
+    worker = _function_by_handler(template, "handlers.worker.handler.handler")
+    assert worker["Timeout"] == 300, worker
+    assert worker["MemorySize"] == 1024, worker
+
+    submit = _function_by_handler(template, "handlers.submit.handler.handler")
+    assert submit["Timeout"] == 10, submit
+    assert submit["MemorySize"] == 256, submit
+
+    # Neither async function references a _sqlite layer; both reference the shared layer.
+    # The template renders Layers entries as {"Ref": "<layerLogicalId>"}.
+    for props in (worker, submit):
+        layer_refs = props.get("Layers", [])
+        assert isinstance(layer_refs, list) and layer_refs, props
+        ref_ids = {ref.get("Ref") for ref in layer_refs if isinstance(ref, dict)}
+        assert shared_layer_id in ref_ids, (ref_ids, shared_layer_id)
+        # No layer logical id in this stack mentions sqlite; the only layer is the shared one.
+        assert all("qlite" not in str(rid).lower() for rid in ref_ids), ref_ids
+    # Belt and suspenders: the stack defines no sqlite layer at all.
+    assert all(
+        "qlite" not in name.lower()
+        for name in functions  # function logical ids
+    ), functions
+    assert all("qlite" not in lid.lower() for lid in layers), layers
+
+
+def test_jobs_routes_present_integrated_to_submit(template: Template) -> None:
+    """POST /jobs and GET /jobs/{id} routes exist on the HTTP API alongside the sync routes.
+
+    The async routes share one HttpLambdaIntegration (SubmitIntegration) to the SubmitFn,
+    mirroring how /query + /health share the ServingFn integration. The existing
+    POST /query and GET /health routes are retained (four routes total).
+    """
+    template.resource_count_is("AWS::ApiGatewayV2::Route", 4)
+    routes = template.find_resources("AWS::ApiGatewayV2::Route")
+    route_keys = {res["Properties"].get("RouteKey") for res in routes.values()}
+    assert route_keys == {
+        "POST /query",
+        "GET /health",
+        "POST /jobs",
+        "GET /jobs/{id}",
+    }, route_keys
+
+    # The two job routes must target the SAME integration (the submit integration), and
+    # that target must differ from the serve integration used by /query + /health.
+    def _target(route_key: str) -> object:
+        for res in routes.values():
+            if res["Properties"].get("RouteKey") == route_key:
+                return json.dumps(res["Properties"].get("Target"))
+        raise AssertionError(f"route {route_key} not found")
+
+    jobs_target = _target("POST /jobs")
+    poll_target = _target("GET /jobs/{id}")
+    query_target = _target("POST /query")
+    assert jobs_target == poll_target, (jobs_target, poll_target)
+    assert jobs_target != query_target, (jobs_target, query_target)
+
+
+def test_submit_role_scoped_to_job_item_and_worker_invoke(template: Template) -> None:
+    """The SubmitFn role writes/reads the job item on the table ARN only and invokes worker.
+
+    S1: dynamodb PutItem/UpdateItem/GetItem scoped to the base table ARN with NO GSI1
+    resource and NO Query/Scan/BatchGetItem action and NO bedrock:* action. S2:
+    lambda:InvokeFunction scoped to the worker function. The SubmitFn role is identified as
+    the DynamoDB role that holds a lambda:InvokeFunction grant and NO Bedrock action.
+    """
+    submit_doc = None
+    for statements in _policy_statements(template):
+        doc_text = json.dumps(statements)
+        has_invoke = "lambda:InvokeFunction" in doc_text
+        has_dynamo = "dynamodb:" in doc_text
+        has_bedrock = "bedrock:" in doc_text
+        if has_invoke and has_dynamo and not has_bedrock:
+            submit_doc = statements
+            break
+    assert submit_doc is not None, "could not locate the SubmitFn role policy"
+
+    doc_text = json.dumps(submit_doc)
+    assert "bedrock:" not in doc_text, "SubmitFn holds a Bedrock grant"
+    assert "index/GSI1" not in doc_text, "SubmitFn is scoped to GSI1"
+    for forbidden in ("dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchGetItem"):
+        assert forbidden not in doc_text, f"SubmitFn holds {forbidden}"
+
+    # The DynamoDB statement grants exactly the three job-item actions on the table ARN.
+    dynamo_actions: set[str] = set()
+    saw_invoke = False
+    for stmt in submit_doc:
+        actions = stmt.get("Action", [])
+        if isinstance(actions, str):
+            actions = [actions]
+        dynamo = {a for a in actions if isinstance(a, str) and a.startswith("dynamodb:")}
+        if dynamo:
+            dynamo_actions |= dynamo
+            stmt_text = json.dumps(stmt)
+            assert "table/MovieIntel" in stmt_text, stmt_text
+            assert "index/GSI1" not in stmt_text, stmt_text
+            assert stmt.get("Resource") != "*", stmt
+        if "lambda:InvokeFunction" in actions:
+            saw_invoke = True
+            assert stmt.get("Resource") != "*", "SubmitFn lambda invoke grants Resource '*'"
+    assert dynamo_actions == {
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:GetItem",
+    }, dynamo_actions
+    assert saw_invoke, "SubmitFn has no lambda:InvokeFunction grant"
+
+
+def test_worker_role_has_bedrock_kb_dynamo_read_and_job_writes(template: Template) -> None:
+    """The WorkerFn role mirrors the serving Bedrock/KB/DynamoDB reads plus job writes.
+
+    It holds bedrock:InvokeModel, bedrock:ApplyGuardrail, bedrock:Retrieve, the DynamoDB
+    tool-read actions on table+GSI1, AND the DynamoDB job-write actions on the table. No
+    statement uses Resource '*' and no action is a bedrock:* wildcard. The WorkerFn role is
+    the one that holds BOTH Bedrock actions AND a DynamoDB write action.
+    """
+    worker_doc = None
+    for statements in _policy_statements(template):
+        doc_text = json.dumps(statements)
+        has_bedrock = "bedrock:InvokeModel" in doc_text
+        has_dynamo_write = "dynamodb:PutItem" in doc_text or "dynamodb:UpdateItem" in doc_text
+        if has_bedrock and has_dynamo_write:
+            worker_doc = statements
+            break
+    assert worker_doc is not None, "could not locate the WorkerFn role policy"
+
+    all_actions: set[str] = set()
+    for stmt in worker_doc:
+        actions = stmt.get("Action", [])
+        if isinstance(actions, str):
+            actions = [actions]
+        all_actions |= {a for a in actions if isinstance(a, str)}
+        resource = stmt.get("Resource")
+        assert resource != "*", "WorkerFn statement grants Resource '*'"
+        if isinstance(resource, list):
+            assert "*" not in resource, "WorkerFn statement grants Resource '*'"
+
+    assert "bedrock:*" not in all_actions, all_actions
+    for required in (
+        "bedrock:InvokeModel",
+        "bedrock:ApplyGuardrail",
+        "bedrock:Retrieve",
+        "dynamodb:GetItem",
+        "dynamodb:BatchGetItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+    ):
+        assert required in all_actions, (required, all_actions)
+
+    doc_text = json.dumps(worker_doc)
+    assert "knowledge-base/YNXUIXEYBQ" in doc_text, "WorkerFn missing KB retrieve resource"
+    assert "table/MovieIntel" in doc_text, "WorkerFn missing table resource"
+    assert "index/GSI1" in doc_text, "WorkerFn missing GSI1 read resource"
 
 
 def _has_bedrock_action_on_resource(template: Template, action: str, resource_substr: str) -> bool:

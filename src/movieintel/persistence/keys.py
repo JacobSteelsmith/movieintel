@@ -19,6 +19,10 @@ from movieintel.domain.schemas import Sentiment
 # Fixed sentinel for the single enriched-movie item under each movie partition.
 META_SK = "META"
 
+# Fixed sentinel sort key for the single async-job item under each ``JOB#`` partition
+# (design Decision 2 key schema), mirroring ``META_SK`` for the movie partition.
+JOB_SK = "JOB"
+
 # Scale/width for the zero-padded PES sort key. PES is 0.00-100.00 (2 dp); scaling by 100
 # yields an int in 0..10000 and 7 digits leaves headroom while sorting correctly.
 _PES_SCALE = 100
@@ -33,6 +37,20 @@ def movie_pk(movie_id: int | str) -> str:
 def meta_sk() -> str:
     """Sort key for the enriched-movie item: ``META``."""
     return META_SK
+
+
+def job_pk(job_id: str) -> str:
+    """Partition key for an async-job item: ``JOB#<job_id>`` (design Decision 2).
+
+    ``job_id`` is ``uuid4().hex`` (lowercase, 32 chars, no dashes); the job id lives ONLY
+    inside this key, so the read path reconstructs it from the method argument.
+    """
+    return f"JOB#{job_id}"
+
+
+def job_sk() -> str:
+    """Sort key for the async-job item: ``JOB`` (fixed sentinel, mirrors ``META``)."""
+    return JOB_SK
 
 
 def sentiment_gsi1pk(sentiment: Sentiment) -> str:
