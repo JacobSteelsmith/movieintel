@@ -16,6 +16,11 @@ from __future__ import annotations
 
 from movieintel.domain.schemas import Sentiment
 
+# Partition-key prefix for enriched-movie items (``MOVIE#<id>``). Exported so a Scan over the
+# shared single table can constrain itself to movie items (not ``JOB#`` records) without
+# re-hardcoding the literal; this is the one source of truth for the movie keyspace.
+MOVIE_PK_PREFIX = "MOVIE#"
+
 # Fixed sentinel for the single enriched-movie item under each movie partition.
 META_SK = "META"
 
@@ -31,7 +36,7 @@ _PES_WIDTH = 7
 
 def movie_pk(movie_id: int | str) -> str:
     """Partition key for an enriched-movie item: ``MOVIE#<movieid>``."""
-    return f"MOVIE#{movie_id}"
+    return f"{MOVIE_PK_PREFIX}{movie_id}"
 
 
 def meta_sk() -> str:

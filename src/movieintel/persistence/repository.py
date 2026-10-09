@@ -21,7 +21,12 @@ from boto3.dynamodb.conditions import Attr, Key
 from movieintel.domain.schemas import Sentiment
 from movieintel.persistence.config import PersistenceConfig
 from movieintel.persistence.item import EnrichedMovie
-from movieintel.persistence.keys import meta_sk, movie_pk, sentiment_gsi1pk
+from movieintel.persistence.keys import (
+    MOVIE_PK_PREFIX,
+    meta_sk,
+    movie_pk,
+    sentiment_gsi1pk,
+)
 
 # BatchGetItem accepts at most 100 keys per request (DynamoDB hard limit); batch_get
 # chunks by this even though the dataset is 50-100 items.
@@ -119,8 +124,15 @@ class MovieIntelRepository:
         cheaper and simpler than maintaining a GSI per numeric field. This is the documented
         small-N tradeoff; it would NOT be acceptable at large scale, where a GSI or a
         different store would be required.
+
+        The single ``MovieIntel`` table is shared with the async-job store (``JOB#`` items),
+        so the ``Scan`` is ALWAYS constrained to movie partitions (``PK`` begins with
+        ``MOVIE#``). This keeps non-movie item types out of the result regardless of the
+        numeric bounds, so ``from_item`` only ever parses movie items. Any numeric bounds are
+        AND-combined with that movie-type guard.
         """
-        filters = _numeric_range_filters(
+        movie_type_guard = Attr("PK").begins_with(MOVIE_PK_PREFIX)
+        numeric_filters = _numeric_range_filters(
             min_budget=min_budget,
             max_budget=max_budget,
             min_revenue=min_revenue,
@@ -128,10 +140,11 @@ class MovieIntelRepository:
             min_runtime=min_runtime,
             max_runtime=max_runtime,
         )
+        filters = (
+            movie_type_guard if numeric_filters is None else movie_type_guard & numeric_filters
+        )
 
-        scan_kwargs: dict[str, Any] = {}
-        if filters is not None:
-            scan_kwargs["FilterExpression"] = filters
+        scan_kwargs: dict[str, Any] = {"FilterExpression": filters}
 
         records: list[EnrichedMovie] = []
         response = self._table.scan(**scan_kwargs)
