@@ -163,3 +163,35 @@ def test_scan_numeric_range_no_bounds_returns_all(
     for mid in (1, 2, 3):
         repo.put(enriched_record(movie_id=mid, pes_value=10.0))
     assert len(repo.scan_numeric_range()) == 3
+
+
+def test_scan_numeric_range_excludes_job_items(
+    dynamodb_table: Any, config: PersistenceConfig, enriched_record: Any
+) -> None:
+    """Scan must ignore ``JOB#`` records sharing the table (regression: KeyError 'movieid').
+
+    The async-job store writes ``JOB#<id>`` items (no ``movieid`` attribute) into the same
+    ``MovieIntel`` table. A bare Scan returned them and ``from_item`` crashed in production;
+    the movie-type guard must exclude them whether or not numeric bounds are supplied.
+    """
+    repo = _repo(dynamodb_table, config)
+    repo.put(enriched_record(movie_id=1, pes_value=10.0, budget=5_000_000))
+    # A job-store-shaped record: JOB# partition, no movieid.
+    dynamodb_table.put_item(
+        Item={
+            "PK": "JOB#abc123",
+            "SK": "JOB",
+            "status": "running",
+            "progress": {"phase": "understanding", "turn": 0, "label": "Understanding"},
+            "created_at": "2020-01-01T00:00:00Z",
+            "updated_at": "2020-01-01T00:00:00Z",
+        }
+    )
+
+    # No numeric bounds: still only the movie item, no KeyError on the job item.
+    unfiltered = repo.scan_numeric_range()
+    assert {r.movie.movie.movie_id for r in unfiltered} == {1}
+
+    # With numeric bounds: same result, job item excluded by the movie-type guard.
+    filtered = repo.scan_numeric_range(min_budget=1_000_000)
+    assert {r.movie.movie.movie_id for r in filtered} == {1}
