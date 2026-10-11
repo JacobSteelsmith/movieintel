@@ -192,7 +192,7 @@ def test_serving_lambda_env_pins_deployed_resource_ids(template: Template) -> No
     assert isinstance(environment, dict), props
     env = environment.get("Variables")
     assert isinstance(env, dict), environment
-    assert env.get("BEDROCK_MODEL_ID") == "us.anthropic.claude-sonnet-4-5-20250929-v1:0", env
+    assert env.get("BEDROCK_MODEL_ID") == "global.anthropic.claude-sonnet-4-6", env
     # The guardrail id is now an in-stack token, not the removed literal fvb8n9pc8e2q.
     assert isinstance(env.get("BEDROCK_GUARDRAIL_ID"), dict), env
     assert env.get("BEDROCK_GUARDRAIL_ID") != "fvb8n9pc8e2q", env
@@ -245,13 +245,18 @@ def test_serving_guardrail_has_prompt_attack(template: Template) -> None:
     assert "non-movie-advice" in topics, topics
 
 
-def test_invoke_model_covers_profile_and_cross_region_fm_arns(template: Template) -> None:
-    """The InvokeModel grant lists the profile ARN + the three cross-region FM ARNs."""
-    profile_suffix = "inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
-    fm_arns = {
-        f"arn:aws:bedrock:{region}::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0"
-        for region in ("us-east-1", "us-east-2", "us-west-2")
-    }
+def test_invoke_model_covers_global_profile_and_fm_arns(template: Template) -> None:
+    """The InvokeModel grant lists the global-profile ARN + regional + region-less FM ARNs.
+
+    A ``global.`` inference profile needs the three-part global-CRIS grant: the regional
+    inference-profile ARN, the regional foundation-model ARN, and the REGION-LESS global
+    foundation-model ARN (``arn:aws:bedrock:::foundation-model/...``) that authorizes
+    worldwide cross-Region routing. The old three-US-region FM ARN set would AccessDenied
+    on a global route.
+    """
+    profile_suffix = "inference-profile/global.anthropic.claude-sonnet-4-6"
+    global_fm_suffix = "arn:aws:bedrock:::foundation-model/anthropic.claude-sonnet-4-6"
+    regional_fm_fragment = "::foundation-model/anthropic.claude-sonnet-4-6"
 
     policies = template.find_resources("AWS::IAM::Policy")
     saw_invoke_profile = False
@@ -266,9 +271,13 @@ def test_invoke_model_covers_profile_and_cross_region_fm_arns(template: Template
             if profile_suffix not in stmt_text:
                 continue
             saw_invoke_profile = True
-            for fm_arn in fm_arns:
-                assert fm_arn in stmt_text, f"missing cross-region FM ARN {fm_arn} in {stmt_text}"
-    assert saw_invoke_profile, "no bedrock:InvokeModel grant covering the inference-profile ARN"
+            assert global_fm_suffix in stmt_text, (
+                f"missing region-less global FM ARN in {stmt_text}"
+            )
+            assert regional_fm_fragment in stmt_text, (
+                f"missing foundation-model ARN for the model in {stmt_text}"
+            )
+    assert saw_invoke_profile, "no InvokeModel grant covering the global inference-profile ARN"
 
 
 def test_apply_guardrail_references_the_in_stack_guardrail(template: Template) -> None:
