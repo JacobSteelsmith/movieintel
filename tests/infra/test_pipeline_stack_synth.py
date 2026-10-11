@@ -250,34 +250,36 @@ def test_enrich_lambda_bedrock_iam_is_scoped(template: Template) -> None:
     assert saw_bedrock_statement, "no scoped Bedrock IAM statement found"
 
 
-def test_enrich_lambda_env_pins_sonnet_45_inference_profile(template: Template) -> None:
-    """At least one Lambda carries BEDROCK_MODEL_ID = the Sonnet 4.5 inference profile id."""
+def test_enrich_lambda_env_pins_sonnet_46_global_inference_profile(template: Template) -> None:
+    """At least one Lambda carries BEDROCK_MODEL_ID = the Sonnet 4.6 global profile id."""
     functions = template.find_resources("AWS::Lambda::Function")
     model_ids = [
         res["Properties"].get("Environment", {}).get("Variables", {}).get("BEDROCK_MODEL_ID")
         for res in functions.values()
         if res["Properties"].get("Runtime") == "python3.12"
     ]
-    assert "us.anthropic.claude-sonnet-4-5-20250929-v1:0" in model_ids, model_ids
+    assert "global.anthropic.claude-sonnet-4-6" in model_ids, model_ids
     assert all(mid != "anthropic.claude-3-5-sonnet-20240620-v1:0" for mid in model_ids), (
         f"a Lambda still pins the retired model id: {model_ids}"
     )
 
 
-def test_enrich_invoke_model_covers_profile_and_cross_region_fm_arns(template: Template) -> None:
-    """The InvokeModel grant lists the profile ARN + the three cross-region FM ARNs.
+def test_enrich_invoke_model_covers_global_profile_and_fm_arns(template: Template) -> None:
+    """The InvokeModel grant lists the global-profile ARN + regional + region-less FM ARNs.
 
-    This is the regression guard for the single-ARN bug: invoking a cross-region
-    inference profile needs bedrock:InvokeModel on both the ``inference-profile/...``
-    ARN and each underlying ``::foundation-model/...`` ARN the profile routes to. The
-    account id is a synth-time token, so match on the ARN resource-path substrings via
-    the stringified statement (same token-tolerant approach as _flatten_definition).
+    Regression guard for the global-CRIS grant: invoking a ``global.`` inference profile
+    needs bedrock:InvokeModel on three resources - the regional ``inference-profile/...``
+    ARN, the regional ``::foundation-model/...`` ARN, AND the REGION-LESS global
+    ``arn:aws:bedrock:::foundation-model/...`` ARN that authorizes worldwide cross-Region
+    routing. The old three-US-region FM ARN set would AccessDenied on a global route. The
+    account/region are synth-time tokens, so match on ARN resource-path substrings via the
+    stringified statement (token-tolerant, as in _flatten_definition).
     """
-    profile_suffix = "inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
-    fm_arns = {
-        f"arn:aws:bedrock:{region}::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0"
-        for region in ("us-east-1", "us-east-2", "us-west-2")
-    }
+    profile_suffix = "inference-profile/global.anthropic.claude-sonnet-4-6"
+    # The region-less global FM ARN is the load-bearing new resource; its exact substring
+    # (double colon for the empty region AND account) must be present.
+    global_fm_suffix = "arn:aws:bedrock:::foundation-model/anthropic.claude-sonnet-4-6"
+    regional_fm_fragment = "::foundation-model/anthropic.claude-sonnet-4-6"
 
     policies = template.find_resources("AWS::IAM::Policy")
     saw_invoke_profile = False
@@ -293,11 +295,15 @@ def test_enrich_invoke_model_covers_profile_and_cross_region_fm_arns(template: T
             if profile_suffix not in stmt_text:
                 continue
             saw_invoke_profile = True
-            for fm_arn in fm_arns:
-                assert fm_arn in stmt_text, f"missing cross-region FM ARN {fm_arn} in {stmt_text}"
+            assert global_fm_suffix in stmt_text, (
+                f"missing region-less global FM ARN in {stmt_text}"
+            )
+            assert regional_fm_fragment in stmt_text, (
+                f"missing foundation-model ARN for the model in {stmt_text}"
+            )
             # The retired model must not appear anywhere in the enrich grant.
             assert "anthropic.claude-3-5-sonnet" not in stmt_text, stmt_text
-    assert saw_invoke_profile, "no bedrock:InvokeModel grant covering the inference-profile ARN"
+    assert saw_invoke_profile, "no InvokeModel grant covering the global inference-profile ARN"
 
 
 def _invoke_model_statements(template: Template) -> list[dict[str, object]]:
@@ -320,26 +326,26 @@ def _as_list(resource: object) -> list[object]:
     return [resource]
 
 
-def test_enrich_invoke_model_lists_exactly_profile_and_three_fm_arns(template: Template) -> None:
-    """The enrich InvokeModel grant lists EXACTLY the profile ARN + 3 FM ARNs, nothing broader.
+def test_enrich_invoke_model_lists_exactly_global_profile_and_two_fm_arns(
+    template: Template,
+) -> None:
+    """The enrich InvokeModel grant lists EXACTLY 3 ARNs for the global profile, nothing broader.
 
-    The account id is a synth-time token so the profile ARN resolves via Fn::Join; match
-    it on the stringified statement. The three cross-region foundation-model ARNs are
-    account-less literals, so assert each appears and that the Resource list has exactly
-    four entries (one profile + three FMs) with no ``*`` and no ``bedrock:*``.
+    Global-CRIS grant = profile ARN + regional FM ARN + region-less global FM ARN. The
+    profile and regional FM ARNs carry synth-time account/region tokens (Fn::Join); the
+    region-less global FM ARN (``arn:aws:bedrock:::foundation-model/...``) is a static
+    literal. Assert exactly three Resource entries, no ``*``, and the region-less global
+    FM literal is present.
     """
-    profile_suffix = "inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
-    fm_arns = {
-        f"arn:aws:bedrock:{region}::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0"
-        for region in ("us-east-1", "us-east-2", "us-west-2")
-    }
+    profile_suffix = "inference-profile/global.anthropic.claude-sonnet-4-6"
+    global_fm_arn = "arn:aws:bedrock:::foundation-model/anthropic.claude-sonnet-4-6"
 
     enrich_stmt = None
     for stmt in _invoke_model_statements(template):
         if profile_suffix in json.dumps(stmt):
             enrich_stmt = stmt
             break
-    assert enrich_stmt is not None, "no enrich InvokeModel statement covering the profile ARN"
+    assert enrich_stmt is not None, "no enrich InvokeModel stmt covering the global profile ARN"
 
     actions = enrich_stmt.get("Action", [])
     if isinstance(actions, str):
@@ -347,14 +353,10 @@ def test_enrich_invoke_model_lists_exactly_profile_and_three_fm_arns(template: T
     assert actions == ["bedrock:InvokeModel"], actions
 
     resources = _as_list(enrich_stmt.get("Resource"))
-    assert len(resources) == 4, f"expected exactly 4 ARNs, found {len(resources)}: {resources}"
+    assert len(resources) == 3, f"expected exactly 3 ARNs, found {len(resources)}: {resources}"
     assert "*" not in resources, resources
-    stmt_text = json.dumps(enrich_stmt)
-    for fm_arn in fm_arns:
-        assert fm_arn in stmt_text, f"missing FM ARN {fm_arn}"
-    # Exactly one of the four is the profile ARN (Fn::Join token), the other three are FMs.
-    literal_fm_count = sum(1 for r in resources if isinstance(r, str) and r in fm_arns)
-    assert literal_fm_count == 3, resources
+    # The region-less global FM ARN is a static literal (no account/region token).
+    assert global_fm_arn in [r for r in resources if isinstance(r, str)], resources
 
 
 def test_embed_invoke_model_scoped_to_titan_only(template: Template) -> None:

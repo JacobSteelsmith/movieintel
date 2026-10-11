@@ -33,38 +33,50 @@ from aws_cdk import aws_bedrock as bedrock
 # REQ-A-5.3). The S3 Vectors index dimension must match the embedder.
 EMBEDDING_DIMENSION = 1024
 
-#: The Claude Sonnet 4.5 cross-region inference profile the agent/enrich Lambdas invoke
-#: via Converse. Invoking an inference profile requires bedrock:InvokeModel on BOTH the
-#: profile ARN AND each underlying foundation-model ARN the profile routes to, so the IAM
-#: grant is built from the profile id plus the underlying model id across the profile's
-#: target regions below. The profile id must stay in sync with ``DEFAULT_MODEL_ID`` in
-#: src/movieintel/config.py (the Lambda env-var source).
-INFERENCE_PROFILE_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+#: The Claude Sonnet 4.6 GLOBAL cross-region inference profile the agent/enrich Lambdas
+#: invoke via Converse. A ``global.`` profile (global CRIS) routes requests to supported
+#: commercial AWS Regions WORLDWIDE, not a fixed US-only set, so its IAM grant differs
+#: from a geographic (``us.``) profile: see :func:`bedrock_invoke_model_resources`. The
+#: profile id must stay in sync with ``DEFAULT_MODEL_ID`` in src/movieintel/config.py (the
+#: Lambda env-var source).
+#:
+#: NOTE on the id: this global profile id is intentionally undated
+#: (``global.anthropic.claude-sonnet-4-6``), confirmed against the Bedrock console - unlike
+#: the Sonnet 4.5 global id which carries a dated suffix
+#: (``global.anthropic.claude-sonnet-4-5-20250929-v1:0``). Keep this constant and
+#: ``DEFAULT_MODEL_ID`` in src/movieintel/config.py in sync.
+INFERENCE_PROFILE_ID = "global.anthropic.claude-sonnet-4-6"
 
-#: The foundation model that the above inference profile fronts (same id, no ``us.``
-#: prefix), used to build the per-region ``::foundation-model/`` resource ARNs.
-UNDERLYING_FOUNDATION_MODEL_ID = "anthropic.claude-sonnet-4-5-20250929-v1:0"
-
-#: Regions the inference profile routes Converse requests to. The grant must cover the
-#: foundation-model ARN in each so a cross-region route does not hit AccessDenied.
-INFERENCE_PROFILE_TARGET_REGIONS = ("us-east-1", "us-east-2", "us-west-2")
+#: The foundation model the above global profile fronts (the profile id without the
+#: ``global.`` prefix). Used to build the regional and region-less ``::foundation-model/``
+#: resource ARNs the global-CRIS grant requires.
+UNDERLYING_FOUNDATION_MODEL_ID = "anthropic.claude-sonnet-4-6"
 
 
 def bedrock_invoke_model_resources(region: str, account: str) -> list[str]:
-    """Return the ARNs a bedrock:InvokeModel grant needs to call the inference profile.
+    """Return the ARNs a bedrock:InvokeModel grant needs for the GLOBAL inference profile.
 
-    Invoking a cross-region inference profile needs bedrock:InvokeModel on BOTH the
-    profile ARN (account-scoped) AND each underlying foundation-model ARN the profile
-    routes to (account-less, one per target region). Granting only the profile ARN - or a
-    single ::foundation-model ARN - yields runtime AccessDenied. Returns the profile ARN
-    followed by the three cross-region foundation-model ARNs.
+    Invoking a ``global.`` (global cross-region) inference profile requires the three-part
+    resource grant AWS documents for global CRIS, NOT the geographic-profile pattern (a
+    profile ARN plus one FM ARN per fixed target region). Granting the old US-region FM
+    ARNs would yield runtime AccessDenied because a global profile can route to any
+    commercial Region, and that cross-region hop is authorized through a REGION-LESS
+    foundation-model ARN. The three resources are:
+
+    1. The regional inference-profile ARN in the requesting Region (account-scoped):
+       ``arn:aws:bedrock:<region>:<account>:inference-profile/global.<model>``.
+    2. The regional foundation-model ARN in the requesting Region (account-less):
+       ``arn:aws:bedrock:<region>::foundation-model/<model>``.
+    3. The GLOBAL foundation-model ARN with NO region and NO account - this is what
+       enables worldwide cross-Region routing and is intentionally region/account-less:
+       ``arn:aws:bedrock:::foundation-model/<model>``.
+
+    Returns the profile ARN followed by the regional and global foundation-model ARNs.
     """
     profile_arn = f"arn:aws:bedrock:{region}:{account}:inference-profile/{INFERENCE_PROFILE_ID}"
-    foundation_model_arns = [
-        f"arn:aws:bedrock:{target_region}::foundation-model/{UNDERLYING_FOUNDATION_MODEL_ID}"
-        for target_region in INFERENCE_PROFILE_TARGET_REGIONS
-    ]
-    return [profile_arn, *foundation_model_arns]
+    regional_fm_arn = f"arn:aws:bedrock:{region}::foundation-model/{UNDERLYING_FOUNDATION_MODEL_ID}"
+    global_fm_arn = f"arn:aws:bedrock:::foundation-model/{UNDERLYING_FOUNDATION_MODEL_ID}"
+    return [profile_arn, regional_fm_arn, global_fm_arn]
 
 
 # -- shared Bedrock Guardrail policy --------------------------------------------

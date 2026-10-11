@@ -17,12 +17,14 @@ from dataclasses import dataclass
 DEFAULT_REGION = "us-east-1"
 
 # Documented default Anthropic Claude model id reachable via the Converse API
-# (design §1.3/§11). This is now a cross-region INFERENCE PROFILE id - the ``us.``
-# prefix marks a Claude Sonnet 4.5 inference profile that routes Converse calls across
-# the us-east-1/us-east-2/us-west-2 foundation-model endpoints. Overridable via
+# (design §1.3/§11). This is a GLOBAL cross-region INFERENCE PROFILE id - the ``global.``
+# prefix marks a Claude Sonnet 4.6 global-CRIS profile that routes Converse calls to
+# supported commercial AWS Regions worldwide (not a fixed US-only set). Overridable via
 # ``BEDROCK_MODEL_ID``. This constant is the ONLY model-id literal in the package - the
-# client reads ``BedrockConfig.model_id``, never a literal.
-DEFAULT_MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+# client reads ``BedrockConfig.model_id``, never a literal. It MUST stay in sync with
+# ``INFERENCE_PROFILE_ID`` in infra/constants.py (the IAM-grant source). This global
+# profile id is intentionally undated (confirmed against the Bedrock console).
+DEFAULT_MODEL_ID = "global.anthropic.claude-sonnet-4-6"
 
 # Bedrock Guardrail versions accept the literal "DRAFT" or a published number.
 DEFAULT_GUARDRAIL_VERSION = "DRAFT"
