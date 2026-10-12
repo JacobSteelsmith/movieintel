@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -17,16 +18,52 @@ MOVIES_DB_PATH = _DB_DIR / "movies.db"
 RATINGS_DB_PATH = _DB_DIR / "ratings.db"
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _require_real_dbs() -> None:
-    """Fail loudly if the real source DBs are missing (tests run against them)."""
-    for path in (MOVIES_DB_PATH, RATINGS_DB_PATH):
-        if not path.is_file():
-            pytest.fail(f"Required source DB not found: {path}")
+def _missing_source_dbs() -> list[Path]:
+    """Return the real source DBs that are absent (empty when both are present)."""
+    return [path for path in (MOVIES_DB_PATH, RATINGS_DB_PATH) if not path.is_file()]
+
+
+def skip_or_fail_if_dbs_missing() -> None:
+    """Skip on CI (or fail locally) when the real source DBs are absent.
+
+    The source DBs (``_sqlite/*.db``) are intentionally never committed - they are
+    gitignored and shipped out of band (a Lambda layer in production). So they are
+    present for a local developer run but absent on CI.
+
+    - On CI (``CI`` env var set, e.g. GitHub Actions), skip when the DBs are missing:
+      there is nothing to run against, and failing would be noise.
+    - Locally (no ``CI`` env var), where the DBs are expected, fail loudly so a developer
+      does not silently skip real-DB coverage.
+
+    Shared by the ``require_real_dbs`` fixture (per-test gating) and by module-level
+    ``pytestmark`` guards (e.g. the pipeline synth tests, which all build the SQLite
+    Lambda layer from the real ``_sqlite/`` dir).
+    """
+    missing = _missing_source_dbs()
+    if not missing:
+        return
+    names = ", ".join(str(path) for path in missing)
+    if os.environ.get("CI"):
+        pytest.skip(f"Source DB(s) not available on CI; skipping real-DB test: {names}")
+    pytest.fail(
+        f"Required source DB not found: {names}. These live in the gitignored _sqlite/ "
+        "and are expected for a local run. Restore them, or set CI=1 to skip real-DB tests."
+    )
 
 
 @pytest.fixture
-def movies_conn() -> Iterator[sqlite3.Connection]:
+def require_real_dbs() -> None:
+    """Per-test gate for tests that read the real read-only source DBs.
+
+    Only tests that request this fixture (directly or via ``movies_conn``/``ratings_conn``)
+    are affected; synthetic-DB tests built with ``build_sqlite_db`` run unconditionally.
+    See :func:`skip_or_fail_if_dbs_missing` for the CI-skip / local-fail policy.
+    """
+    skip_or_fail_if_dbs_missing()
+
+
+@pytest.fixture
+def movies_conn(require_real_dbs: None) -> Iterator[sqlite3.Connection]:
     conn = open_source(MOVIES_DB_PATH)
     try:
         yield conn
@@ -35,7 +72,7 @@ def movies_conn() -> Iterator[sqlite3.Connection]:
 
 
 @pytest.fixture
-def ratings_conn() -> Iterator[sqlite3.Connection]:
+def ratings_conn(require_real_dbs: None) -> Iterator[sqlite3.Connection]:
     conn = open_source(RATINGS_DB_PATH)
     try:
         yield conn

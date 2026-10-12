@@ -21,10 +21,19 @@ import pytest
 from aws_cdk.assertions import Template
 from pipeline_stack import MovieIntelPipelineStack
 
+from tests.conftest import skip_or_fail_if_dbs_missing
+
 
 @pytest.fixture(scope="module")
 def template() -> Template:
-    """Synthesize the stack once per module."""
+    """Synthesize the stack once per module.
+
+    Synthesis builds the SQLite Lambda layer from the real ``_sqlite/`` dir (via
+    ``check_source_dbs``), so this whole module needs the real source DBs. Skip on CI
+    (where they are absent) rather than failing the build. Every test here depends on
+    this fixture, so gating it here gates the module.
+    """
+    skip_or_fail_if_dbs_missing()
     app = cdk.App()
     stack = MovieIntelPipelineStack(
         app, "MovieIntelPipelineStack", env=cdk.Environment(region="us-east-1")

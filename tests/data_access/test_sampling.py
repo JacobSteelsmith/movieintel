@@ -151,7 +151,7 @@ def test_sample_excludes_blank_overview_and_unrated(
         assert s.rating_count >= 1
 
 
-def test_demo_main_runs(capsys: pytest.CaptureFixture[str]) -> None:
+def test_demo_main_runs(require_real_dbs: None, capsys: pytest.CaptureFixture[str]) -> None:
     from movieintel.data_access.demo import main
 
     exit_code = main(["--n", "50", "--seed", "42"])

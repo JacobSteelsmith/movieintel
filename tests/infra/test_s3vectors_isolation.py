@@ -49,7 +49,7 @@ def test_import_s3vectors_raises_when_module_missing(monkeypatch: pytest.MonkeyP
         constants.import_s3vectors()
 
 
-def test_check_source_dbs_passes_for_real_sqlite_dir() -> None:
+def test_check_source_dbs_passes_for_real_sqlite_dir(require_real_dbs: None) -> None:
     """The real ``_sqlite/`` directory satisfies the guard (both DBs present)."""
     constants.check_source_dbs(constants.SQLITE_SOURCE_DIR)
 
@@ -83,7 +83,7 @@ def test_shared_layer_stages_under_python_prefix(tmp_path: Path) -> None:
     assert any(python_dir.glob("pydantic_core*"))
 
 
-def test_sqlite_layer_stages_under_sqlite_prefix(tmp_path: Path) -> None:
+def test_sqlite_layer_stages_under_sqlite_prefix(require_real_dbs: None, tmp_path: Path) -> None:
     """The SQLite layer bundler stages the source DBs under ``sqlite/``.
 
     A Lambda layer mounts at ``/opt`` and the Extract handler reads ``SQLITE_DIR``
