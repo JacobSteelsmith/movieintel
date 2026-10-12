@@ -20,7 +20,7 @@ from tests.conftest import MOVIES_DB_PATH
 
 
 @pytest.fixture
-def sqlite_dir(monkeypatch: pytest.MonkeyPatch) -> str:
+def sqlite_dir(require_real_dbs: None, monkeypatch: pytest.MonkeyPatch) -> str:
     directory = str(MOVIES_DB_PATH.parent)
     monkeypatch.setenv("SQLITE_DIR", directory)
     return directory
