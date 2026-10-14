@@ -34,7 +34,7 @@ bounded repair turn. The model is asked for **exactly one JSON object and nothin
   `effectiveness.explanation` *from* that value and echo the value back verbatim.
 - **Bounded repair:** on a JSON-parse or Pydantic-validation failure, a repair turn echoes
   the validation error and asks for a corrected single JSON object. Repair is bounded by
-  `MAX_REPAIR_ATTEMPTS` (default `2`,
+  `MAX_REPAIR_ATTEMPTS` (default `4`,
   [`enrichment/client.py`](../../src/movieintel/enrichment/client.py)); on exhaustion the
   movie is recorded as a per-item `Failed` outcome and the batch continues (never aborts).
 - **Outcomes** ([`enrichment/results.py`](../../src/movieintel/enrichment/results.py)):
